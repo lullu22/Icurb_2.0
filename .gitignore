@@ -1,0 +1,14 @@
+# Ignora le cartelle dei dataset
+Topo-boundary-master/graph_based_baselines/DinoV3/
+
+# Ignora i PDF grandi
+Topo-boundary-master/dataset/topoboundary_supplementary.pdf
+
+# Ignora tutte le immagini TIFF
+*.tiff
+
+# --- NUOVA REGOLA ---
+# Ignora i log degli esperimenti (cartella runs)
+Topo-boundary-master/graph_based_baselines/iCurb/GNN/runs/
+
+

@@ -1,0 +1,11 @@
+*.zip
+*.pth
+*.png
+*.json
+records
+checkpoints
+**/__pycache__
+!img/*
+dataset
+dataset_PMM-NY
+dataset_manhattan

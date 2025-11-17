@@ -1,0 +1,23 @@
+# device 
+device: 'cuda:0'
+
+# training params
+epochs: 3 # number of epochs
+batch_size: 128 # batch size to train with the buffer data
+lr_rate: 0.0001 # learning rate
+weight_decay: 0.00001
+max_length: 1500 # max iteration number for each single instance ( before we use 120 as default value) - test with PMM_NY 200 - test with manhattan 250 (v1_v2_v3)  v4 1500 v5_v6 1000
+
+visualization: True # whether generate visualizations of the trajectories
+
+# test
+test: False # whether run test
+gt_init_vertex: True # whether use gt initial vertices to start iCurb
+
+# dirs
+checkpoints_dir: './checkpoints/'
+
+# docker 
+docker_sub_dir: graph_based_baselines/Enhanced-iCurb
+docker_container_name: topo_enhanced_iCurb
+docker_port_number: 5009 # port number for tensorboard

@@ -1,0 +1,16 @@
+*.zip
+*.pth
+*.png
+*.json
+records
+checkpoints
+**/__pycache__
+!utils/*
+dataset 
+dataset_NY
+dataset_ORIGINAL
+dataset_PMM-NY
+dataset_manhattan
+dataset_stoccarda
+aug_dataset
+
