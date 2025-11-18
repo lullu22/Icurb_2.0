@@ -1,6 +1,6 @@
+import sys
 import os
-import sys 
-
+# Aggiunge la cartella padre (iCurb) al path di sistema
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import json
@@ -8,21 +8,18 @@ import torch
 import numpy as np
 import torchvision.transforms.functional as tvf
 from tqdm import tqdm
-import timm 
 import skimage.io as io
 from skimage import morphology, util
 from PIL import Image
 import pickle
 
-# Import GNN e helper
+# Import GNN
 import torch.nn.functional as F
-from torch_geometric.nn import GATConv 
+from torch_geometric.nn import GATv2Conv  # <--- IMPORTANTE: GATv2
 from torch_geometric.data import Data
 from torch_geometric.utils import to_undirected
-from scipy.spatial.distance import pdist, squareform
-from scipy.sparse.csgraph import dijkstra
 
-# Import per la pulizia
+# Import pulizia immagini
 from skimage.morphology import remove_small_objects
 from scipy.ndimage import binary_fill_holes
 
@@ -30,29 +27,37 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# Importa le definizioni dei modelli
+# Importa FPN
 from models.models_encoder import FPN 
 
 # --- CONFIGURAZIONE ---
+# Percorsi
 FPN_CHECKPOINT_PATH = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/iCurb/checkpoints/seg_pretrain_manhattan_efficentnet_1.6_v2.pth"
-GNN_CHECKPOINT_PATH = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/iCurb/GNN/checkpoints/gnn_refiner_gat.pth"
+GNN_CHECKPOINT_PATH = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/iCurb/GNN/checkpoints/gnn_cleaner_gat.pth" # Il modello appena addestrato
+
 DATA_SPLIT_JSON = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/iCurb/dataset_manhattan/data_split.json"
 IMAGE_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/iCurb/dataset_manhattan/cropped_tiff" 
-OUTPUT_VISUALIZATION_DIR = "./records/final_refined_graphs_3_panel" # Nuova cartella di Output
+
+# Cartelle di Output
+OUTPUT_RL_READY_DIR = "./records/rl_ready_graphs"    # Qui andranno i file per l'RL
+OUTPUT_VISUALIZATION_DIR = "./records/final_refinement_viz" # Qui le immagini per noi
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+# Parametri Segmentazione
 THRESHOLD = 0.2
 CLEANING_MIN_SIZE = 25 
-LINK_CANDIDATE_DISTANCE = 80.0
 SAMPLING_DISTANCE = 30
 IMG_SIZE = 1000.0
+
+# Parametri GNN (DEVONO ESSERE UGUALI A TRAIN_GNN.PY)
+IN_CHANNELS = 5
+HIDDEN_CHANNELS = 128
+HEADS = 16
 NUM_CLASSES = 2
 # ----------------------
 
-#
-# --- (Classi Vertex, Graph, GATRefiner e funzioni generate_graph, _get_edge_index - omesse per brevità) ---
-# (Sono identiche al codice precedente)
-#
+# --- 1. Classi Grafo (Standard) ---
 class Vertex():
     def __init__(self,v):
         self.coord = v; self.index = v[0] * 1000 + v[1]
@@ -60,8 +65,7 @@ class Vertex():
         self.processed_neighbors = []; self.sampled_neighbors = []
         self.key_vertex = False
     def compare(self,v):
-        if self.coord[0] == v[0] and self.coord[1] == v[1]: return True
-        return False
+        return self.coord[0] == v[0] and self.coord[1] == v[1]
     def next(self,previous):
         neighbors = self.neighbors.copy()
         if previous in neighbors: neighbors.remove(previous)
@@ -91,7 +95,8 @@ class Graph():
             if v.pixel_degree != 2:
                 v.key_vertex = True; self.key_vertices.append(v); self.sampled_vertices.append(v)
 
-def generate_graph(skeleton, file_name, graph_dir):
+# --- 2. Generazione Grafo Sporco (5 Feature) ---
+def generate_graph(skeleton, pred_mask):
     def find_neighbors(v,img,remove=False):
         output_v = []; H, W = img.shape
         def get_pixel_value(u):
@@ -103,13 +108,19 @@ def generate_graph(skeleton, file_name, graph_dir):
         get_pixel_value([v[0]-1,v[1]-1]); get_pixel_value([v[0]-1,v[1]+1])
         if remove: img[v[0],v[1]] = 0
         return output_v
+
     graph = Graph(); img = skeleton.copy() 
     if np.sum(img) == 0: return {'vertices':[], 'adj':np.array([]), 'features':[]}
+    
     pre_points = np.where(img!=0)
     pre_points = [[pre_points[0][i],pre_points[1][i]] for i in range(len(pre_points[0]))]
+    
     for point in pre_points:
         v = Vertex(point); graph.add_v(v,find_neighbors(point,img))
+    
     graph.find_key_vertices() 
+    
+    # Sampling logic
     for key_vertex in graph.key_vertices:
         if len(key_vertex.unprocessed_neighbors):
             for neighbor in key_vertex.unprocessed_neighbors.copy(): 
@@ -126,269 +137,186 @@ def generate_graph(skeleton, file_name, graph_dir):
                     if next_v is None: break 
                     pre_v = curr_v; curr_v = next_v; counter += 1
                 sampled_v.sampled_neighbors.append(curr_v); curr_v.sampled_neighbors.append(sampled_v)
-                if pre_v in curr_v.unprocessed_neighbors:
-                     curr_v.unprocessed_neighbors.remove(pre_v)
+                if pre_v in curr_v.unprocessed_neighbors: curr_v.unprocessed_neighbors.remove(pre_v)
+
     vertices = []; features = [] 
     for ii, v in enumerate(graph.sampled_vertices):
         v.index = ii
         vertices.append([int(v.coord[0]), int(v.coord[1])])
-        degree = v.pixel_degree 
-        angle = 0.0; num_sampled_neighbors = len(v.sampled_neighbors)
-        if num_sampled_neighbors == 1:
-            n1 = v.sampled_neighbors[0]; dy = n1.coord[0] - v.coord[0]; dx = n1.coord[1] - v.coord[1]
-            angle = np.arctan2(dy, dx)
-        elif num_sampled_neighbors == 2:
-            n1 = v.sampled_neighbors[0]; n2 = v.sampled_neighbors[1]
-            dy = n2.coord[0] - n1.coord[0]; dx = n2.coord[1] - n1.coord[1]
-            angle = np.arctan2(dy, dx)
-        features.append([degree, angle])
+        
+        cy, cx = float(v.coord[0]), float(v.coord[1])
+        degree = float(v.pixel_degree)
+        angle = 0.0; num = len(v.sampled_neighbors)
+        if num == 1:
+            n1 = v.sampled_neighbors[0]
+            angle = np.arctan2(n1.coord[0]-cy, n1.coord[1]-cx)
+        elif num == 2:
+            n1, n2 = v.sampled_neighbors[0], v.sampled_neighbors[1]
+            angle = np.arctan2(n2.coord[0]-n1.coord[0], n2.coord[1]-n1.coord[1])
+        intensity = float(pred_mask[int(cy), int(cx)])
+        
+        features.append([cy, cx, degree, angle, intensity])
+
     if not graph.sampled_vertices: return {'vertices':[], 'adj':np.array([]), 'features':[]}
+    
     adjacent = np.ones((len(graph.sampled_vertices),len(graph.sampled_vertices))) * np.inf
     for v in graph.sampled_vertices:
-        for u in v.sampled_neighbors:
+        for u in v.sampled_neighbors: 
             if u in graph.sampled_vertices: 
-                dist = v.distance(u); adjacent[v.index,u.index] = dist; adjacent[u.index,v.index] = dist
-    graph_data = {'vertices':vertices, 'adj':adjacent, 'features': features}
-    return graph_data
+                dist = v.distance(u)
+                adjacent[v.index,u.index] = dist; adjacent[u.index,v.index] = dist
+                
+    return {'vertices':vertices, 'adj':adjacent, 'features': features}
 
-class GATRefiner(torch.nn.Module):
+# --- 3. Definizione Modello GNN (GATv2Aggiornata) ---
+class GATCleaner(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, heads=4):
-        super(GATRefiner, self).__init__()
-        self.conv1 = GATConv(in_channels, hidden_channels, heads=heads)
-        self.conv2 = GATConv(hidden_channels * heads, hidden_channels, heads=heads)
-        self.conv3 = GATConv(hidden_channels * heads, hidden_channels, heads=1, concat=False)
+        super(GATCleaner, self).__init__()
+        # Deve essere identica a quella usata in train_gnn.py
+        self.conv1 = GATv2Conv(in_channels, hidden_channels, heads=heads)
+        self.conv2 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)
+        self.conv3 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=1, concat=False)
         self.node_cls_head = torch.nn.Linear(hidden_channels, NUM_CLASSES) 
-        self.link_pred_head = torch.nn.Linear(hidden_channels * 2, 1)
+
     def forward(self, x, edge_index):
         x = F.elu(self.conv1(x, edge_index))
         x = F.elu(self.conv2(x, edge_index))
         x = self.conv3(x, edge_index)
-        node_output = self.node_cls_head(x); link_embedding = x
-        return node_output, link_embedding
+        return self.node_cls_head(x)
 
 def _get_edge_index(adj_matrix):
-    if adj_matrix.size == 0:
-        return torch.tensor([], dtype=torch.long).reshape(2, 0)
+    if adj_matrix.size == 0: return torch.tensor([], dtype=torch.long).reshape(2, 0)
     row, col = np.where((adj_matrix != np.inf) & (np.eye(adj_matrix.shape[0]) == 0))
     edge_index = torch.tensor(np.stack([row, col]), dtype=torch.long)
-    edge_index = to_undirected(edge_index)
-    return edge_index
+    return to_undirected(edge_index)
 
-#
-# --- Componente 5: Funzione di Visualizzazione Finale (MODIFICATA A 3 PANNELLI) ---
-#
-def save_final_visualization(original_rgb_img, 
-                             all_pred_nodes, original_edges, 
-                             nodes_to_keep_mask, links_to_add, 
-                             output_path, name):
+# --- 4. Crea Grafo Pulito (Elimina Nodi) ---
+def create_clean_graph(dirty_graph_data, keep_mask):
+    old_vertices = dirty_graph_data['vertices']
+    old_adj = dirty_graph_data['adj']
+    old_features = dirty_graph_data['features']
     
-    # Crea la figura con 3 pannelli
+    keep_indices = np.where(keep_mask)[0]
+    
+    if len(keep_indices) == 0:
+        return {'vertices': [], 'adj': np.array([]), 'features': []}
+    
+    new_vertices = [old_vertices[i] for i in keep_indices]
+    new_features = [old_features[i] for i in keep_indices] 
+    
+    # Sotto-matrice adiacenza
+    new_adj = old_adj[np.ix_(keep_indices, keep_indices)]
+    
+    return {'vertices': new_vertices, 'adj': new_adj, 'features': new_features}
+
+# --- 5. Visualizzazione ---
+def save_final_visualization(rgb_img, dirty_data, clean_data, mask, output_path, name):
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(30, 10))
-    fig.suptitle(f"Pipeline di Raffinamento per {name}", fontsize=16)
+    fig.suptitle(f"Pipeline Refinement: {name}", fontsize=16)
     
-    all_pred_nodes_np = np.array(all_pred_nodes)
-    nodes_kept = all_pred_nodes_np[nodes_to_keep_mask]
-    nodes_discarded = all_pred_nodes_np[~nodes_to_keep_mask]
-
-    # --- Pannello 1: Grafo Sporco (Input GNN) ---
-    ax1.imshow(original_rgb_img)
-    if len(all_pred_nodes_np) > 0:
-        ax1.scatter(all_pred_nodes_np[:, 1], all_pred_nodes_np[:, 0], c='red', s=5, label='Nodi Sporchi')
-    for (n1_idx, n2_idx) in original_edges:
-        if n1_idx < len(all_pred_nodes_np) and n2_idx < len(all_pred_nodes_np):
-            n1, n2 = all_pred_nodes_np[n1_idx], all_pred_nodes_np[n2_idx]
-            ax1.plot([n1[1], n2[1]], [n1[0], n2[0]], color='cyan', linewidth=1.0, alpha=0.5) 
-    ax1.set_title("1. Input GNN: Grafo Sporco (con Rumore)")
-    ax1.axis('off')
-
-    # --- Pannello 2: Predizioni GNN (Debug) ---
-    ax2.imshow(original_rgb_img)
-    if len(all_pred_nodes_np) > 0:
-        # Mostra TUTTI i nodi, colorati per decisione
-        ax2.scatter(nodes_discarded[:, 1], nodes_discarded[:, 0], c='red', s=5, label='Nodi Scartati')
-        ax2.scatter(nodes_kept[:, 1], nodes_kept[:, 0], c='lime', s=5, label='Nodi Mantenuti')
-        # Mostra i link che la GNN vuole aggiungere
-        for (n1_idx, n2_idx) in links_to_add:
-             if n1_idx < len(all_pred_nodes_np) and n2_idx < len(all_pred_nodes_np):
-                n1, n2 = all_pred_nodes_np[n1_idx], all_pred_nodes_np[n2_idx]
-                ax2.plot([n1[1], n2[1]], [n1[0], n2[0]], color='magenta', linewidth=2, linestyle='--', label='Link Riparati')
-    ax2.set_title("2. Predizioni GNN (Debug)")
-    ax2.axis('off')
-
-    # --- Pannello 3: Grafo Finale (Output) ---
-    ax3.imshow(original_rgb_img)
-    if len(all_pred_nodes_np) > 0:
-        # Mostra SOLO i nodi Mantenuti
-        ax3.scatter(nodes_kept[:, 1], nodes_kept[:, 0], c='lime', s=10, label='Nodi Raffinati')
-        
-        # Mostra SOLO gli archi Mantenuti
-        for (n1_idx, n2_idx) in original_edges:
-            if nodes_to_keep_mask[n1_idx] and nodes_to_keep_mask[n2_idx]:
-                n1, n2 = all_pred_nodes_np[n1_idx], all_pred_nodes_np[n2_idx]
-                ax3.plot([n1[1], n2[1]], [n1[0], n2[0]], color='lime', linewidth=1.5)
-        
-        # Mostra SOLO gli archi Riparati
-        for (n1_idx, n2_idx) in links_to_add:
-            if n1_idx < len(all_pred_nodes_np) and n2_idx < len(all_pred_nodes_np) and nodes_to_keep_mask[n1_idx] and nodes_to_keep_mask[n2_idx]:
-                n1, n2 = all_pred_nodes_np[n1_idx], all_pred_nodes_np[n2_idx]
-                ax3.plot([n1[1], n2[1]], [n1[0], n2[0]], color='magenta', linewidth=2, linestyle='--')
-                
-    ax3.set_title("3. Output: Grafo Finale Raffinato")
-    ax3.axis('off')
+    dirty_nodes = np.array(dirty_data['vertices'])
     
-    plt.tight_layout()
-    plt.savefig(output_path, bbox_inches='tight', pad_inches=0.1, dpi=200)
+    # 1. Input
+    ax1.imshow(rgb_img)
+    if len(dirty_nodes) > 0:
+        ax1.scatter(dirty_nodes[:, 1], dirty_nodes[:, 0], c='red', s=10, label='Input Nodes')
+    ax1.set_title("1. Input Sporco (FPN)")
+    
+    # 2. GNN Decision
+    ax2.imshow(rgb_img)
+    if len(dirty_nodes) > 0:
+        kept = dirty_nodes[mask]
+        discarded = dirty_nodes[~mask]
+        ax2.scatter(discarded[:, 1], discarded[:, 0], c='red', s=10, label='Rumore')
+        ax2.scatter(kept[:, 1], kept[:, 0], c='lime', s=10, label='Strada')
+    ax2.set_title("2. Pulizia GNN")
+    ax2.legend()
+    
+    # 3. Output
+    ax3.imshow(rgb_img)
+    clean_nodes = np.array(clean_data['vertices'])
+    if len(clean_nodes) > 0:
+        ax3.scatter(clean_nodes[:, 1], clean_nodes[:, 0], c='lime', s=15, label='Nodi Puliti')
+        # Mostra collegamenti rimasti
+        adj = clean_data['adj']
+        r, c = np.where((adj != np.inf) & (np.triu(np.ones_like(adj), k=1).astype(bool)))
+        for i in range(len(r)):
+            p1, p2 = clean_nodes[r[i]], clean_nodes[c[i]]
+            ax3.plot([p1[1], p2[1]], [p1[0], p2[0]], 'lime', lw=1.0)
+    ax3.set_title("3. Output Finale")
+    
+    plt.savefig(output_path, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
 
-#
-# --- Componente 6: Main (La Pipeline di Inferenza) ---
-#
+# --- Main ---
 def main():
     print(f"Using device: {DEVICE}")
     
-    # 1. Carica Modello FPN
-    print(f"Loading FPN model from: {FPN_CHECKPOINT_PATH}")
-    fpn_model = FPN(n_channels=4, n_classes=1) 
-    if torch.cuda.is_available():
-        fpn_model.load_state_dict(torch.load(FPN_CHECKPOINT_PATH))
-    else:
-        fpn_model.load_state_dict(torch.load(FPN_CHECKPOINT_PATH, map_location=torch.device('cpu')))
-    fpn_model.to(DEVICE); fpn_model.eval() 
-    print("FPN model ready.")
+    # Load FPN
+    fpn = FPN(n_channels=4, n_classes=1).to(DEVICE)
+    fpn.load_state_dict(torch.load(FPN_CHECKPOINT_PATH, map_location=DEVICE))
+    fpn.eval()
 
-    # 2. Carica Modello GNN
-    print(f"Loading GNN model from: {GNN_CHECKPOINT_PATH}")
-    IN_CHANNELS = 4 
-    HIDDEN_CHANNELS = 16
-    NUM_HEADS = 4
-    gnn_model = GATRefiner(in_channels=IN_CHANNELS, hidden_channels=HIDDEN_CHANNELS, heads=NUM_HEADS)
-    if torch.cuda.is_available():
-        gnn_model.load_state_dict(torch.load(GNN_CHECKPOINT_PATH))
-    else:
-        gnn_model.load_state_dict(torch.load(GNN_CHECKPOINT_PATH, map_location=torch.device('cpu')))
-    gnn_model.to(DEVICE); gnn_model.eval()
-    print("GNN model ready.")
+    # Load GNN
+    print(f"Loading GNN from {GNN_CHECKPOINT_PATH}...")
+    gnn = GATCleaner(in_channels=IN_CHANNELS, hidden_channels=HIDDEN_CHANNELS, heads=HEADS).to(DEVICE)
+    gnn.load_state_dict(torch.load(GNN_CHECKPOINT_PATH, map_location=DEVICE))
+    gnn.eval()
 
-    # 3. Leggi la lista di Test
-    print(f"Reading test list from: {DATA_SPLIT_JSON}")
-    try:
-        with open(DATA_SPLIT_JSON, 'r') as f:
-            test_list = json.load(f)['test'] 
-    except FileNotFoundError:
-        print(f"ERROR: Data split JSON not found at {DATA_SPLIT_JSON}"); return
-        
-    print(f"Found {len(test_list)} test images.")
-    os.makedirs(OUTPUT_VISUALIZATION_DIR, exist_ok=True) 
-
-    print(f"Starting inference pipeline...")
+    os.makedirs(OUTPUT_RL_READY_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_VISUALIZATION_DIR, exist_ok=True)
     
-    with torch.no_grad(): 
-        for name in tqdm(test_list, desc="Refining Test Graphs"):
+    with open(DATA_SPLIT_JSON, 'r') as f:
+        test_list = json.load(f)['test']
+
+    print(f"Inizio pulizia su {len(test_list)} immagini di Test...")
+    
+    with torch.no_grad():
+        for name in tqdm(test_list):
             try:
-                # --- PASSO 1: Carica Immagine ---
+                # 1. Immagine -> Heatmap
                 img_path = os.path.join(IMAGE_DIR, f"{name}.tiff")
-                img_full_tiff = Image.open(img_path) 
-                original_rgb_array = np.array(img_full_tiff.convert('RGB'))
-                tiff_for_model = tvf.to_tensor(img_full_tiff).to(DEVICE)
-                tiff_batch = tiff_for_model.unsqueeze(0) 
+                img_pil = Image.open(img_path)
+                img_rgb = np.array(img_pil.convert('RGB'))
+                t_in = tvf.to_tensor(img_pil).unsqueeze(0).to(DEVICE)
+                preds, _ = fpn(t_in)
+                heatmap = torch.sigmoid(preds).squeeze().cpu().numpy()
                 
-                # --- PASSO 2: Esegui FPN (Segmentazione) ---
-                predictions, _ = fpn_model(tiff_batch)
-                pred_mask = torch.sigmoid(predictions)
-                pred_mask_np = pred_mask.squeeze(0).squeeze(0).cpu().numpy()
+                # 2. Heatmap -> Grafo Sporco
+                mask = (heatmap > THRESHOLD)
+                mask = remove_small_objects(mask, min_size=CLEANING_MIN_SIZE)
+                mask = binary_fill_holes(mask)
+                skel = util.img_as_ubyte(morphology.skeletonize(mask, method='lee'))
                 
-                # --- PASSO 3: Crea Scheletro Sporco ---
-                binary_mask_dirty = (pred_mask_np > THRESHOLD)
-                cleaned_mask = remove_small_objects(binary_mask_dirty, min_size=CLEANING_MIN_SIZE)
-                filled_mask = binary_fill_holes(cleaned_mask)
-                skeleton = morphology.skeletonize(filled_mask, method='lee')
-                skeleton_salvabile = util.img_as_ubyte(skeleton)
-                
-                # --- PASSO 4: Crea Grafo Sporco (con 4 feature) ---
-                graph_data_dirty = generate_graph(skeleton_salvabile, "", None) 
-                
-                all_pred_nodes = graph_data_dirty.get('vertices', [])
-                all_pred_features = graph_data_dirty.get('features', [])
-                all_pred_adj = graph_data_dirty.get('adj', np.array([]))
+                graph_dirty = generate_graph(skel, heatmap)
+                if not graph_dirty['vertices']: continue
 
-                if len(all_pred_nodes) == 0:
-                    tqdm.write(f"  -> Img: {name} | Grafo vuoto. Salto.")
-                    continue
+                # 3. Grafo Sporco -> GNN
+                feats = graph_dirty['features']
+                x_tensor = torch.tensor(feats, dtype=torch.float)
+                x_tensor[:, 0] /= IMG_SIZE; x_tensor[:, 1] /= IMG_SIZE
+                edge_index = _get_edge_index(graph_dirty['adj'])
+                data_gnn = Data(x=x_tensor, edge_index=edge_index).to(DEVICE)
                 
-                # --- PASSO 5: Prepara i Dati per la GNN ---
-                x_features = torch.cat([
-                    torch.tensor(all_pred_nodes, dtype=torch.float) / IMG_SIZE, 
-                    torch.tensor(all_pred_features, dtype=torch.float)         
-                ], dim=1)
-                edge_index = _get_edge_index(all_pred_adj)
+                # 4. GNN -> Maschera Pulizia
+                logits = gnn(data_gnn.x, data_gnn.edge_index)
+                keep_mask = (torch.argmax(logits, dim=1) == 0).cpu().numpy() # 0 = Keep
                 
-                data = Data(x=x_features, edge_index=edge_index).to(DEVICE)
+                # 5. Maschera -> Grafo Pulito
+                graph_clean = create_clean_graph(graph_dirty, keep_mask)
                 
-                # --- PASSO 6: Esegui GNN (Raffinamento) ---
-                node_pred_logits, link_emb = gnn_model(data.x, data.edge_index)
-                
-                # --- PASSO 7: Decodifica Predizioni GNN ---
-                node_pred_labels = torch.argmax(node_pred_logits, dim=1).cpu().numpy()
-                nodes_to_keep_mask = (node_pred_labels == 0)
-                
-                endpoints = []
-                for i in range(len(all_pred_nodes)):
-                    if all_pred_features[i][0] <= 1: # Grado 0 o 1
-                        endpoints.append(i)
-                
-                links_to_add = []
-                if len(endpoints) >= 2:
-                    endpoint_coords = np.array([all_pred_nodes[i] for i in endpoints])
-                    dist_matrix = squareform(pdist(endpoint_coords))
-                    dist_matrix[dist_matrix == 0] = np.inf 
+                # 6. Salvataggio
+                with open(os.path.join(OUTPUT_RL_READY_DIR, f"{name}.pickle"), 'wb') as f:
+                    pickle.dump(graph_clean, f)
                     
-                    candidate_pairs_set = set()
-                    map_g1_to_all = {node_idx: i for i, node_idx in enumerate(endpoints)}
-                    for i, node_i_idx in enumerate(endpoints):
-                        j = np.argmin(dist_matrix[i, :])
-                        dist = dist_matrix[i, j]
-                        if dist < LINK_CANDIDATE_DISTANCE:
-                            node_j_idx = endpoints[j]
-                            pair = tuple(sorted((node_i_idx, node_j_idx)))
-                            candidate_pairs_set.add(pair)
-                    
-                    candidate_pairs = list(candidate_pairs_set)
-                    
-                    if candidate_pairs:
-                        link_label_index = torch.tensor(candidate_pairs, dtype=torch.long).t().contiguous().to(DEVICE)
-                        src, dst = link_label_index
-                        emb_src = link_emb[src]; emb_dst = link_emb[dst]
-                        emb_pair = torch.cat([emb_src, emb_dst], dim=1) 
-                        link_pred_score = gnn_model.link_pred_head(emb_pair).squeeze(-1) 
-                        links_to_add_mask = (torch.sigmoid(link_pred_score) > 0.5).cpu().numpy()
-                        links_to_add = np.array(candidate_pairs)[links_to_add_mask]
-
-                # --- PASSO 8: Salva Visualizzazione Finale ---
-                png_name = f"{name}.png"
-                output_path_viz = os.path.join(OUTPUT_VISUALIZATION_DIR, png_name)
-                original_edges = data.edge_index.t().cpu().numpy()
+                # Visualizza solo ogni tanto per velocità (o togli l'if per vederle tutte)
+                save_final_visualization(img_rgb, graph_dirty, graph_clean, keep_mask, 
+                                         os.path.join(OUTPUT_VISUALIZATION_DIR, f"{name}.png"), name)
                 
-                save_final_visualization(
-                    original_rgb_array, 
-                    all_pred_nodes, 
-                    original_edges,
-                    nodes_to_keep_mask, 
-                    links_to_add, 
-                    output_path_viz, 
-                    name
-                )
-                
-                tqdm.write(f"  -> Img: {name} | Nodi Raffinati: {np.sum(nodes_to_keep_mask)}/{len(all_pred_nodes)} | Link Aggiunti: {len(links_to_add)}")
-                
-            except FileNotFoundError:
-                print(f"Warning: Image not found, skipped: {img_path}")
             except Exception as e:
-                print(f"Error processing {name}: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"Error {name}: {e}")
 
-    print("\nInference pipeline complete.")
-    print(f"Final refined visualizations saved to: {OUTPUT_VISUALIZATION_DIR}")
+    print(f"\nFinito! I grafi puliti sono in: {OUTPUT_RL_READY_DIR}")
 
 if __name__ == "__main__":
     main()

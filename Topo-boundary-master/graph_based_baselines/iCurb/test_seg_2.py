@@ -37,7 +37,7 @@ OUTPUT_VISUALIZATION_DIR = "./records/gt/pred_visualization_2"
 THRESHOLD = 0.2
 CLEANING_MIN_SIZE = 25 
 REPAIR_MAX_DISTANCE = 20 
-SAMPLING_DISTANCE = 30 # <-- NUOVA COSTANTE PER IL CAMPIONAMENTO
+SAMPLING_DISTANCE = 30 
 # ----------------------
 
 #
@@ -83,13 +83,13 @@ class Graph():
             if v.pixel_degree != 2:
                 v.key_vertex = True
                 self.key_vertices.append(v)
-                self.sampled_vertices.append(v) # Aggiungi i key_vertex di default
+                self.sampled_vertices.append(v) 
 
 
 #
-# --- generate_graph (MODIFICATO CON CAMPIONAMENTO) ---
+# --- generate_graph  (5 FEATURES) ---
 #
-def generate_graph(skeleton, file_name, graph_dir):
+def generate_graph(skeleton, pred_mask, file_name, graph_dir):
     def find_neighbors(v,img,remove=False):
         output_v = []
         H, W = img.shape
@@ -118,12 +118,10 @@ def generate_graph(skeleton, file_name, graph_dir):
     for point in pre_points:
         v = Vertex(point); graph.add_v(v,find_neighbors(point,img))
     
-    # Aggiunge solo i key_vertex (incroci/endpoint) alla lista
     graph.find_key_vertices() 
     
-    # --- LOGICA DI CAMPIONAMENTO (Simile all'originale, ma più pulita) ---
+    # --- LOGICA DI CAMPIONAMENTO ---
     for key_vertex in graph.key_vertices:
-        # Itera su una copia per evitare errori
         for neighbor in key_vertex.unprocessed_neighbors.copy():
             if neighbor not in key_vertex.unprocessed_neighbors:
                 continue
@@ -131,18 +129,16 @@ def generate_graph(skeleton, file_name, graph_dir):
             
             curr_v = neighbor
             pre_v = key_vertex
-            sampled_v = key_vertex # L'ultimo nodo salvato è il key_vertex
+            sampled_v = key_vertex 
             counter = 1
             
             while(not curr_v.key_vertex):
-                # --- MODIFICA: Campiona ogni SAMPLING_DISTANCE ---
                 if counter % SAMPLING_DISTANCE == 0:
                     sampled_v.sampled_neighbors.append(curr_v)
                     curr_v.sampled_neighbors.append(sampled_v)
                     sampled_v = curr_v
-                    if not sampled_v.key_vertex: # Assicurati che non sia già stato aggiunto
+                    if not sampled_v.key_vertex: 
                         graph.sampled_vertices.append(sampled_v)
-                # --- FINE MODIFICA ---
                 
                 next_v = curr_v.next(pre_v)
                 if next_v is None: break
@@ -153,29 +149,33 @@ def generate_graph(skeleton, file_name, graph_dir):
                 pre_v = curr_v; curr_v = next_v
                 counter += 1
             
-            # Connetti all'ultimo key_vertex trovato
             sampled_v.sampled_neighbors.append(curr_v)
             curr_v.sampled_neighbors.append(sampled_v)
             
             if pre_v in curr_v.unprocessed_neighbors:
                  curr_v.unprocessed_neighbors.remove(pre_v)
-    # --- FINE LOGICA DI CAMPIONAMENTO ---
+    # --- FINE CAMPIONAMENTO ---
 
-    # --- CALCOLO FEATURE ---
+    # --- CALCOLO FEATURE (5 FEATURES) ---
     vertices = []
     features = [] 
     
     for ii, v in enumerate(graph.sampled_vertices):
         v.index = ii
+        # Salviamo le coordinate anche in vertices per compatibilità con vecchi script di visualizzazione
         vertices.append([int(v.coord[0]), int(v.coord[1])])
         
-        # Grado del pixel (dal primo scan)
-        degree = v.pixel_degree 
+        # 1. Coordinate Y (Feature spaziale)
+        coord_y = float(v.coord[0])
+        # 2. Coordinate X (Feature spaziale)
+        coord_x = float(v.coord[1])
+        
+        # 3. Grado (Feature topologica)
+        degree = float(v.pixel_degree)
+        
+        # 4. Angolo (Feature geometrica/direzionale)
         angle = 0.0
-        
-        # Angolo basato sui vicini *campionati*
         num_sampled_neighbors = len(v.sampled_neighbors)
-        
         if num_sampled_neighbors == 1:
             n1 = v.sampled_neighbors[0]
             dy = n1.coord[0] - v.coord[0]
@@ -188,7 +188,11 @@ def generate_graph(skeleton, file_name, graph_dir):
             dx = n2.coord[1] - n1.coord[1]
             angle = np.arctan2(dy, dx)
         
-        features.append([degree, angle])
+        # 5. Intensity (Feature semantica dalla Heatmap)
+        intensity = float(pred_mask[int(v.coord[0]), int(v.coord[1])])
+        
+        # VETTORE FINALE A 5 DIMENSIONI
+        features.append([coord_y, coord_x, degree, angle, intensity])
 
     if not graph.sampled_vertices:
         graph_data = {'vertices':[], 'adj':np.array([]), 'features':[]}
@@ -266,7 +270,6 @@ def save_visualization(original_rgb_img, skeleton_img_array, graph_data, output_
     
     if vertices:
         vertices_np = np.array(vertices)
-        # Ora che campioniamo, i punti sono di meno, aumentiamo la dimensione
         plt.scatter(vertices_np[:, 1], vertices_np[:, 0], c='red', s=10, zorder=5, label='Nodes') 
         
         for i in range(len(vertices)):
@@ -274,7 +277,7 @@ def save_visualization(original_rgb_img, skeleton_img_array, graph_data, output_
                 if adj_matrix[i, j] != np.inf:
                     v1 = vertices[i]
                     v2 = vertices[j]
-                    plt.plot([v1[1], v2[1]], [v1[0], v2[0]], 'cyan', linewidth=1.5) # Spessore normale
+                    plt.plot([v1[1], v2[1]], [v1[0], v2[0]], 'cyan', linewidth=1.5) 
     
     plt.title(f"Graph on RGB for {name}")
     plt.axis('off')
@@ -282,7 +285,7 @@ def save_visualization(original_rgb_img, skeleton_img_array, graph_data, output_
     plt.close()
 
 #
-# --- Funzione Main (con aggiunta Stampa) ---
+# --- Funzione Main ---
 #
 def main():
     print(f"Using device: {DEVICE}")
@@ -301,7 +304,7 @@ def main():
     try:
         with open(DATA_SPLIT_JSON, 'r') as f:
             json_data = json.load(f)
-            test_list = json_data['train']
+            test_list = json_data['train'] 
     except FileNotFoundError:
         print(f"ERROR: Data split JSON not found at {DATA_SPLIT_JSON}")
         return
@@ -311,7 +314,7 @@ def main():
     os.makedirs(OUTPUT_GRAPH_DIR, exist_ok=True)
     os.makedirs(OUTPUT_VISUALIZATION_DIR, exist_ok=True) 
 
-    print(f"Starting full pipeline (Sampling every {SAMPLING_DISTANCE}px)...")
+    print(f"Starting pipeline (Sampling {SAMPLING_DISTANCE}px) -> Generating 5 Features...")
     
     with torch.no_grad(): 
         for name in tqdm(test_list, desc="Processing Predicted Graphs"):
@@ -326,50 +329,47 @@ def main():
                 
                 predictions, _ = net(tiff_batch)
                 pred_mask = torch.sigmoid(predictions)
-                pred_mask_np = pred_mask.squeeze(0).squeeze(0).cpu().numpy()
+                pred_mask_np = pred_mask.squeeze(0).squeeze(0).cpu().numpy() 
                 
                 binary_mask_dirty = (pred_mask_np > THRESHOLD)
                 cleaned_mask = remove_small_objects(binary_mask_dirty, min_size=CLEANING_MIN_SIZE)
                 filled_mask = binary_fill_holes(cleaned_mask)
                 
                 skeleton = morphology.skeletonize(filled_mask, method='lee')
-                
                 skeleton_salvabile = util.img_as_ubyte(skeleton)
+                
                 png_name = f"{name}.png"
                 output_path_png = os.path.join(OUTPUT_SKELETON_DIR, png_name)
                 io.imsave(output_path_png, skeleton_salvabile)
                 
-                graph_data_raw = generate_graph(skeleton_salvabile, png_name, OUTPUT_GRAPH_DIR)
+                # Passiamo pred_mask_np (heatmap)
+                graph_data_raw = generate_graph(skeleton_salvabile, pred_mask_np, png_name, OUTPUT_GRAPH_DIR)
                 
                 graph_data_repaired = repair_graph(graph_data_raw, max_distance=REPAIR_MAX_DISTANCE)
                 
                 output_path_viz = os.path.join(OUTPUT_VISUALIZATION_DIR, png_name)
                 save_visualization(original_rgb_array, skeleton_salvabile, graph_data_repaired, output_path_viz, name)
                 
-                # --- Stampa Statistiche Grafo ---
                 vertices = graph_data_repaired.get('vertices', [])
                 adj_matrix = graph_data_repaired.get('adj', np.array([]))
-                
                 total_vertices = len(vertices)
                 num_endpoints = 0
                 if total_vertices > 0:
                     for i in range(total_vertices):
                         neighbors = np.sum(adj_matrix[i, :] != np.inf) 
-                        if neighbors <= 1:
-                            num_endpoints += 1
+                        if neighbors <= 1: num_endpoints += 1
                             
-                tqdm.write(f"  -> Img: {name} | Vertici Totali: {total_vertices} | Endpoint: {num_endpoints}")
-                # --- FINE NUOVA SEZIONE ---
+                tqdm.write(f"  -> Img: {name} | Vertici: {total_vertices} | Endpoint: {num_endpoints}")
                 
             except FileNotFoundError:
                 print(f"Warning: Image not found, skipped: {img_path}")
             except Exception as e:
                 print(f"Error processing {name}: {e}")
+                import traceback
+                traceback.print_exc()
 
     print("\nProcessing complete.")
-    print(f"Final skeletons saved to: {OUTPUT_SKELETON_DIR}")
-    print(f"Final graphs saved to: {OUTPUT_GRAPH_DIR}")
-    print(f"Visualizations saved to: {OUTPUT_VISUALIZATION_DIR}")
+    print(f"Final graphs with 5 FEATURES saved to: {OUTPUT_GRAPH_DIR}")
 
 if __name__ == "__main__":
     main()
