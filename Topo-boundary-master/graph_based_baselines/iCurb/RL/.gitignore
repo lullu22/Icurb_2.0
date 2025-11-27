@@ -1,0 +1,17 @@
+*.zip
+*.pth
+*.png
+*.npy
+*.json
+*.pt
+records
+checkpoints
+**/__pycache__
+!img/*
+dataset
+dataset_PMM-NY
+dataset_manhattan
+dataset_prova
+dataset_stoccarda
+gnn_dataset_20_80
+runs

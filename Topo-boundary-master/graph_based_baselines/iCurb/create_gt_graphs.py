@@ -217,7 +217,17 @@ def main():
 
     try:
         with open(DATA_SPLIT_JSON, 'r') as f:
-            file_list = json.load(f)['train'] 
+            data_info = json.load(f) # Leggi il file una sola volta!
+            
+            # 1. Recupera la lista 'train'
+            train_list = data_info.get('train', [])
+            
+            # 2. Recupera la lista 'valid' 
+            valid_list = data_info.get('valid', []) 
+            
+            # 3. Unisce le due liste (unione di array)
+            file_list = train_list + valid_list
+
     except FileNotFoundError:
         print(f"ERROR: Data split JSON not found at {DATA_SPLIT_JSON}")
         return
