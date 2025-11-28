@@ -16,8 +16,8 @@ from rl_model import CustomCnnExtractor
 
 LOG_DIR = "./logs/ppo_road_drawer_v1"
 CHECKPOINT_DIR = "./checkpoints_rl"
-TOTAL_TIMESTEPS = 2_000_000  
-EVAL_FREQ_EPISODES = 3    
+TOTAL_TIMESTEPS = 10_000_000  
+EVAL_FREQ_EPISODES = 5  
 
 # Hyperparameters PPO (Standard)
 PPO_PARAMS = {

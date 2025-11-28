@@ -2,8 +2,8 @@ import os
 import json
 import numpy as np
 import skimage.io as io
-from skimage import morphology, util
-from tqdm import tqdm # Importa tqdm per tqdm.write
+from skimage import morphology, util, measure
+from tqdm import tqdm 
 import pickle
 from PIL import Image 
 
@@ -20,28 +20,35 @@ from scipy.sparse.csgraph import dijkstra
 DATA_SPLIT_JSON = "./dataset_manhattan/data_split.json"
 GT_SKELETON_DIR = "./dataset_manhattan/labels/binary_map" 
 IMAGE_DIR = "./dataset_manhattan/cropped_tiff" 
-OUTPUT_GT_GRAPH_DIR = "./records/gt/gt_graphs_2"        
-OUTPUT_GT_VIZ_DIR = "./records/gt/gt_visualizations_2"  
+OUTPUT_GT_GRAPH_DIR = "./records/gt/gt_graphs_2_RDP"        
+OUTPUT_GT_VIZ_DIR = "./records/gt/gt_visualizations_2_RDP"  
 SAMPLING_DISTANCE = 30 
 # ----------------------
 
 #
-# --- Vertex, Graph (COPIATE DA test_seg.py) ---
+# --- Vertex, Graph Classes ---
 #
 class Vertex():
     def __init__(self,v):
-        self.coord = v; self.index = v[0] * 1000 + v[1]
-        self.neighbors = []; self.unprocessed_neighbors = []
-        self.processed_neighbors = []; self.sampled_neighbors = []
+        self.coord = v
+        self.index = v[0] * 1000 + v[1]
+        self.neighbors = [] 
+        self.unprocessed_neighbors = []
+        self.processed_neighbors = []
+        self.sampled_neighbors = []
         self.key_vertex = False
+
     def compare(self,v):
-        if self.coord[0] == v[0] and self.coord[1] == v[1]: return True
-        return False
+        if self.coord[0] == v[0] and self.coord[1] == v[1]:
+            return True
+        else:
+            return False
+        
     def next(self,previous):
         neighbors = self.neighbors.copy()
         if previous in neighbors:
             neighbors.remove(previous)
-        if not neighbors: # Se è un vicolo cieco
+        if not neighbors: # no neighbors left 
             return None
         return neighbors[0]
     def distance(self,v):
@@ -49,10 +56,13 @@ class Vertex():
 
 class Graph():
     def __init__(self):
-        self.vertices = []; self.key_vertices = []; self.sampled_vertices = []
+        self.vertices = []
+        self.key_vertices = []
+        self.sampled_vertices = []
     def find_vertex(self,index):
         for v in self.vertices:
-            if index == v.index: return v
+            if index == v.index: 
+                return v
         return None
     def add_v(self,v,neighbors):
         self.vertices.append(v)
@@ -70,12 +80,13 @@ class Graph():
                 v.key_vertex = True; self.key_vertices.append(v); self.sampled_vertices.append(v)
 
 #
-# --- generate_graph (COPIATO DA test_seg.py) ---
+# --- generate_graph ---
 #
 def generate_graph(skeleton, file_name, graph_dir):
+
     def find_neighbors(v,img,remove=False):
         output_v = []
-        # Definisci i limiti dell'immagine
+        # limit of image
         H, W = img.shape
         def get_pixel_value(u):
             if u[0] < 0 or u[0] >= H or u[1] < 0 or u[1] >= W: return
@@ -87,7 +98,8 @@ def generate_graph(skeleton, file_name, graph_dir):
         if remove: img[v[0],v[1]] = 0
         return output_v
         
-    graph = Graph(); img = skeleton.copy() 
+    graph = Graph()
+    img = skeleton.copy() 
     
     if np.sum(img) == 0:
         graph_data = {'vertices':[], 'adj':np.array([]), 'features':[]}
@@ -111,7 +123,68 @@ def generate_graph(skeleton, file_name, graph_dir):
                     continue
                 key_vertex.unprocessed_neighbors.remove(neighbor)
                 
-                curr_v = neighbor; pre_v = key_vertex; sampled_v = key_vertex; counter = 1
+                # --- start traversing ---
+                segment_pixels = [key_vertex.coord] 
+                curr_v = neighbor
+                pre_v = key_vertex
+
+                """
+                #sampled_v = key_vertex
+                #counter = 1
+                """
+
+                while (not curr_v.key_vertex):
+                    segment_pixels.append(curr_v.coord)
+                    next_v = curr_v.next(pre_v)
+
+                    if next_v is None:
+                        break 
+                    pre_v = curr_v
+                    curr_v = next_v
+                
+                segment_pixels.append(curr_v.coord) # final key vertex added to the list
+                # --- end traversing ---
+
+                # geometric simplification of the segment 
+                coords = np.array(segment_pixels) # Convert to NumPy array for processing whit skimage
+
+                simplified_coords = measure.approximate_polygon(coords, tolerance=2.0) # Ramer-Douglas-Peucker algorithm
+
+                
+
+                final_sampled_coords = [simplified_coords[0]] # always keep the first point
+
+                for i in range(1, len(simplified_coords)-1):
+                    p_curr = simplified_coords[i]
+                    p_prev = final_sampled_coords[-1]
+
+                    dist = np.linalg.norm(p_curr - p_prev)
+                
+                    final_sampled_coords.append(p_curr)
+
+                last_node_obj = key_vertex # starting from the key vertex already in the graph
+
+                for i in range(1, len(final_sampled_coords)-1):
+                    coord = final_sampled_coords[i]
+
+                    # Create new Vertex and add to graph
+                    new_v = Vertex(coord)
+                    new_v.pixel_degree = 2  # intermediate vertex
+                    graph.sampled_vertices.append(new_v)
+
+                    # Connect last node to new node
+                    last_node_obj.sampled_neighbors.append(new_v)
+                    new_v.sampled_neighbors.append(last_node_obj)
+
+                    last_node_obj = new_v
+
+                # Finally, connect to the ending key vertex
+                end_node_obj = curr_v
+                last_node_obj.sampled_neighbors.append(end_node_obj)
+                end_node_obj.sampled_neighbors.append(last_node_obj)
+                    
+
+                """
                 while(not curr_v.key_vertex):
                     if counter % SAMPLING_DISTANCE == 0:
                         sampled_v.sampled_neighbors.append(curr_v)
@@ -125,10 +198,13 @@ def generate_graph(skeleton, file_name, graph_dir):
                     pre_v = curr_v; curr_v = next_v; counter += 1
                 
                 sampled_v.sampled_neighbors.append(curr_v); curr_v.sampled_neighbors.append(sampled_v)
+                """
+
                 if pre_v in curr_v.unprocessed_neighbors:
                      curr_v.unprocessed_neighbors.remove(pre_v)
 
-    # --- CALCOLO FEATURE ---
+
+    # --- start feature calculation ---
     vertices = []
     features = [] 
     
@@ -153,7 +229,7 @@ def generate_graph(skeleton, file_name, graph_dir):
             angle = np.arctan2(dy, dx)
         
         features.append([degree, angle])
-    # --- FINE CALCOLO FEATURE ---
+    # --- end feauture calc ---
 
     if not graph.sampled_vertices:
         graph_data = {'vertices':[], 'adj':np.array([]), 'features':[]}
@@ -177,7 +253,7 @@ def generate_graph(skeleton, file_name, graph_dir):
         pickle.dump(graph_data, jf)
         
     return graph_data
-# --- FINE generate_graph ---
+# --- end generate_graph ---
 
 
 #
@@ -245,7 +321,6 @@ def main():
             original_tiff = Image.open(tiff_path)
             original_rgb_array = np.array(original_tiff.convert('RGB'))
             
-            # (Non serve pulizia qui, assumiamo che il GT sia pulito)
             
             graph_data_gt = generate_graph(gt_skeleton_img, png_name, OUTPUT_GT_GRAPH_DIR)
             

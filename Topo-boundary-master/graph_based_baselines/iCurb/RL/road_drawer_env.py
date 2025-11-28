@@ -6,14 +6,16 @@ import os
 import pickle
 import json
 import math
+import networkx as nx
 from scipy.spatial import cKDTree
 from scipy.sparse.csgraph import dijkstra
 from skimage.draw import line
 import matplotlib.pyplot as plt 
+from tqdm import tqdm
 
 # --- CONFIGURATION ---
 BASE_PROJECT_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/iCurb/"
-GT_GRAPH_DIR = os.path.join(BASE_PROJECT_DIR, "records", "gt", "gt_graphs_2") 
+GT_GRAPH_DIR = os.path.join(BASE_PROJECT_DIR, "records", "gt", "gt_graphs_2_RDP") 
 GT_JSON_PATH = os.path.join(BASE_PROJECT_DIR, "dataset_manhattan", "data_split.json")     
 
 IMAGE_SIZE = 1000
@@ -24,7 +26,7 @@ BORDER_WIDTH = 10
 ANGULAR_ACTIONS_DEGREES = np.array([-45, -30, -15,-10,-5, 0, 5, 10, 15, 30, 45], dtype=np.float32) 
 stop_action_index= len(ANGULAR_ACTIONS_DEGREES)
 SEGMENT_LENGTH = 4 
-WAYPOINT_MIN_DIST = 120
+WAYPOINT_MIN_DIST = 10.0
 
 class RoadDrawerEnv(gym.Env):
     def __init__(self, split='train', device='cpu'):
@@ -45,12 +47,25 @@ class RoadDrawerEnv(gym.Env):
             print(f"ERRORE JSON: {e}")
             self.file_list = []
 
-        enable_overfit = True  
+        enable_overfit = False  #############################################################################################
 
-        target_image = "005250_04" # we can select the desired image for testing a single image 
-
+        training_images = ["005250_04", "002247_02","000227_10","000250_13","002242_22"]
+        validation_images = ["980200_40"]
+        
         if enable_overfit: 
-            self.file_list = [target_image]
+            if self.split == 'train':
+                self.file_list = training_images
+            else:
+                self.file_list = validation_images
+        
+        if not enable_overfit: 
+            self.file_list = self._filter_dataset()
+
+            if len(self.file_list) == 0:
+                print(f"Error: No valid files found for split '{self.split}'. Check dataset and paths.")
+            
+            self.initial_file_list = self.file_list.copy()
+            
         
         self.initial_file_list = self.file_list.copy()
 
@@ -71,6 +86,9 @@ class RoadDrawerEnv(gym.Env):
         self.max_steps = 600 
         self.drawn_nodes = set()
         self.current_map_name = None
+
+        self.predicted_graph = None 
+        self.last_node_id = 0
         
         # --- SNAPSHOT  Memory ---
         self.last_finished_segment = [] 
@@ -93,6 +111,51 @@ class RoadDrawerEnv(gym.Env):
         self.steps_penalty = -0.005
 
         self.global_episode_count = 0
+
+    def _filter_dataset(self): 
+
+        print(f"--- pre_ceck dataset ({self.split.upper()}) for valid path ---")
+        print(f"Initial dataset size: {len(self.file_list)} images")
+
+        valid_files = []
+        discarded_count = 0 
+
+        iteration = tqdm(self.file_list, desc="Filtering dataset for valid paths", unit="images")
+
+        for img_name in iteration:
+            try:
+                heatmap_path = os.path.join(self.heatmap_dir, f"{img_name}.npy")
+                graph_path = os.path.join(self.gt_graph_dir, f"{img_name}.pickle")
+
+                if not os.path.exists(heatmap_path) or not os.path.exists(graph_path):
+                    discarded_count += 1
+                    continue
+
+                self.heatmap = np.load(heatmap_path)
+                with open(graph_path, 'rb') as f:
+                    self.gt_data = pickle.load(f)
+
+                possible_missions = self._find_all_valid_paths()
+
+                if len(possible_missions) > 0:
+                    valid_files.append(img_name)
+                else:
+                    discarded_count += 1
+            
+            except Exception as e:
+                discarded_count += 1
+                continue
+
+            self.heatmap = None 
+            self.gt_data = None
+
+            print(f"Valid files found: {len(valid_files)} | Discarded: {discarded_count}", end='\r')
+
+        return valid_files
+    
+            
+
+
 
     def _find_all_valid_paths(self):
         """
@@ -151,12 +214,18 @@ class RoadDrawerEnv(gym.Env):
             self.last_finished_segment = list(self.current_segment)
             self.last_mission_path = list(self.mission_path)
             self.last_target = self.current_target
+
+            if hasattr(self,'predicted_graph') and self.predicted_graph is not None:
+                self.last_predicted_graph = self.predicted_graph
+            else:
+                self.last_predicted_graph = None
+
             if self.heatmap is not None:
                 self.last_heatmap = self.heatmap.copy()
 
         super().reset(seed=seed)
         
-        # --- GESTIONE PERSISTENZA (RETRY DOPO FALLIMENTO) ---
+        
         restor_old_mission = False
         if self.mission_cache is not None: 
             if (not self.last_run_success) and (self.consecutive_failures < self.max_failures): 
@@ -183,14 +252,25 @@ class RoadDrawerEnv(gym.Env):
             self.steps_in_episode = 0
             self.visited_pixels = set()          
             self.visited_pixels.add((cy, cx))    
+
+            ## initialize variables for dynamic graphs only in validation/test
+            if self.split != 'train':
+                self.predicted_graph = nx.Graph() # empty graph
+                start_node_pos = (float(self.current_pos[0]), float(self.current_pos[1]))
+
+                self.predicted_graph.add_node(0, pos=start_node_pos)
+                self.last_node_id = 0 # ID of the last added node
+            else : 
+                self.predicted_graph = None
+                
             
             return self._get_observation(), {}
 
         # -------------------------------------------------------
-        # NUOVA MISSIONE (Solo se ha avuto successo o ha superato i retry)
+        # NEW MISSION
         # -------------------------------------------------------
         
-        # 2. Carica Nuova Mappa (popola self.available_paths_cache)
+    
         self._load_new_map_data()
         self.global_episode_count += 1
         
@@ -250,7 +330,16 @@ class RoadDrawerEnv(gym.Env):
         self.drawn_nodes = set()
         self.drawn_nodes.add((cy, cx))
         self.steps_in_episode = 0
-        
+
+        if self.split != 'train':
+            self.predicted_graph = nx.Graph() # Crea nuovo grafo vuoto
+            start_node_pos = (float(self.current_pos[0]), float(self.current_pos[1]))
+            self.predicted_graph.add_node(0, pos=start_node_pos)
+            self.last_node_id = 0 
+        else:
+            self.predicted_graph = None
+
+                
         return self._get_observation(), {}
 
         
@@ -316,7 +405,7 @@ class RoadDrawerEnv(gym.Env):
             if coord not in self.visited_pixels:
                 self.visited_pixels.add(coord)
                 new_pixels_count += 1
-    
+
 
 
         # Muro
@@ -343,6 +432,32 @@ class RoadDrawerEnv(gym.Env):
             self.drawn_nodes.add(coord)
             
         self.steps_in_episode += 1
+
+        # logic for construction of graph
+
+        if self.predicted_graph is not None:
+
+            last_node_pos = self.predicted_graph.nodes[self.last_node_id]['pos']
+            last_node_array = np.array(last_node_pos)
+
+            # comupute distance from last node
+            dist_from_last_node = np.linalg.norm(self.current_pos - last_node_array)
+
+            #threshold to add new node 
+            NODE_ADD_DISTANCE = 30.0
+
+            if dist_from_last_node >= NODE_ADD_DISTANCE:
+                #create new id 
+                new_id = self.last_node_id + 1
+                current_node_pos = (float(self.current_pos[0]), float(self.current_pos[1]))
+
+                #we add the new node
+                self.predicted_graph.add_node(new_id, pos=current_node_pos)
+                #we add the edge between last node and current node
+                self.predicted_graph.add_edge(self.last_node_id, new_id, weight=dist_from_last_node)
+                #update last node id
+                self.last_node_id = new_id
+
 
         # REWARD MOVIMENTO
         avg_intensity = np.mean(self.heatmap[rr, cc]) # average intensity of the line 
@@ -524,12 +639,15 @@ class RoadDrawerEnv(gym.Env):
 
             if not all_paths:
                 self.available_paths_cache = []
-                print(f"[{self.split.upper()}] WARNING: no valid paths found in {self.current_map_name}!")  
-            elif self.split == 'train': 
+                print(f"[{self.split.upper()}] WARNING: no valid paths found in {self.current_map_name}!") 
+            elif self.split == 'train':
+                
+                self.available_paths_cache = all_paths[:]
+            else:
+               
                 self.available_paths_cache = all_paths[:]
             
-            else:
-                self.available_paths_cache = all_paths[:]
+            
             
 
         except Exception as e:
@@ -581,7 +699,27 @@ class RoadDrawerEnv(gym.Env):
             
             # La testa dell'agente la mostriamo solo se è vivo (non nel replay statico)
             if not use_ghost: 
-                plt.scatter(sx[-1], sy[-1], c='lime', s=80, zorder=11, edgecolors='black')
+                plt.scatter(sx[-1], sy[-1], c='lime', s=80, zorder=11, edgecolors='black') 
+
+        graph_to_plot = None
+        if use_ghost:
+            graph_to_plot = getattr(self, 'last_predicted_graph', None)
+        else:
+            graph_to_plot = getattr(self, 'predicted_graph', None)
+
+        if graph_to_plot is not None:
+
+            for u, v in graph_to_plot.edges():
+                if 'pos' in graph_to_plot.nodes[u] and 'pos' in graph_to_plot.nodes[v]:
+                    pos_u = graph_to_plot.nodes[u]['pos'] # (y,x format)
+                    pos_v = graph_to_plot.nodes[v]['pos'] # (y,x format)
+                    # we need to invert (y,x) to (x,y) for plotting
+                    plt.plot([pos_u[1], pos_v[1]], [pos_u[0], pos_v[0]], c='red', linewidth=1.5, alpha=0.7, zorder=15)
+
+            for node_id in graph_to_plot.nodes():
+                if 'pos' in graph_to_plot.nodes[node_id]:
+                    pos = graph_to_plot.nodes[node_id]['pos']
+                    plt.scatter(pos[1], pos[0], c='red', s=30, zorder=16, edgecolors='black')
 
         if len(path_to_plot) > 0:
             py, px = zip(*path_to_plot)
@@ -592,9 +730,11 @@ class RoadDrawerEnv(gym.Env):
             if not use_ghost:
                 plt.plot([self.current_pos[1], tgt_to_plot[1]], 
                          [self.current_pos[0], tgt_to_plot[0]], c='red', ls=':', alpha=0.7)
-            plt.scatter(tgt_to_plot[1], tgt_to_plot[0], c='deepskyblue', s=350, marker='*', zorder=12)
-
-        plt.title(f"Status: {label_txt} | Steps: {final_steps}")  ##### check if works
+            #plt.scatter(tgt_to_plot[1], tgt_to_plot[0], c='deepskyblue', s=350, marker='*', zorder=12)
+            hit_box = plt.Circle((tgt_to_plot[1], tgt_to_plot[0]), 15.0, color='lime', fill=False, linewidth= 0.5,linestyle = "--", zorder=12)
+            plt.gca().add_patch(hit_box)
+            
+        plt.title(f"Status: {label_txt} | Steps: {final_steps}")  
         plt.legend(loc='upper right')
         plt.axis('off')
         

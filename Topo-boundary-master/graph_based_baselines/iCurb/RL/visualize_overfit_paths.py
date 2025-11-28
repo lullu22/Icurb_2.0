@@ -8,11 +8,13 @@ import matplotlib.cm as cm
 
 # =================CONFIGURATION=================
 BASE_PROJECT_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/iCurb/"
-GT_GRAPH_DIR = os.path.join(BASE_PROJECT_DIR, "records", "gt", "gt_graphs_2")
+GT_GRAPH_DIR = os.path.join(BASE_PROJECT_DIR, "records", "gt", "gt_graphs_2_RDP")
 HEATMAP_DIR = os.path.join(BASE_PROJECT_DIR, "RL", "train", "heatmaps") 
 
-TARGET_IMAGE_NAME = "005250_04"
-OUTPUT_IMAGE_PATH = f"overfit_paths_grid_{TARGET_IMAGE_NAME}.png"
+TARGET_IMAGE_LIST = ["005250_04", "002247_02","000227_10","000250_13","002242_22", "980200_40"]  # Change this to visualize a different image
+
+output_folder = "debug_paths_grids"
+os.makedirs(output_folder, exist_ok=True)
 # ===============================================
 
 def _reconstruct_path_indices(preds, start, end):
@@ -28,11 +30,16 @@ def _reconstruct_path_indices(preds, start, end):
     path.append(start)
     return path[::-1]
 
-def visualize_all_paths_grid():
-    print(f"--- Generazione Griglia Percorsi per: {TARGET_IMAGE_NAME} ---")
+def visualize_all_paths_grid(image_name):
 
-    heatmap_path = os.path.join(HEATMAP_DIR, f"{TARGET_IMAGE_NAME}.npy")
-    graph_path = os.path.join(GT_GRAPH_DIR, f"{TARGET_IMAGE_NAME}.pickle")
+    output_folder = "debug_paths_grids"
+    os.makedirs(output_folder, exist_ok=True)
+    OUTPUT_IMAGE_PATH = os.path.join(output_folder, f"{image_name}_all_paths_grid.png")
+    print(f"--- Generazione Griglia Percorsi per: {image_name} ---")
+    
+
+    heatmap_path = os.path.join(HEATMAP_DIR, f"{image_name}.npy")
+    graph_path = os.path.join(GT_GRAPH_DIR, f"{image_name}.pickle")
 
     if not os.path.exists(heatmap_path) or not os.path.exists(graph_path):
         print(f"Errore: File non trovati.")
@@ -146,4 +153,6 @@ def visualize_all_paths_grid():
     print(f"Griglia salvata in: {OUTPUT_IMAGE_PATH}")
 
 if __name__ == "__main__":
-    visualize_all_paths_grid()
+    for img in TARGET_IMAGE_LIST:
+        visualize_all_paths_grid(img)
+
