@@ -458,7 +458,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     ### change when we want try new experiment #######
-    new_name = "manhattan_efficentnet_b4_1.6"
+    new_name = "manhattan_efficentnet_b4_1.6_RL"
     ##################################################
 
     # Selezione loss

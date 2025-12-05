@@ -7,14 +7,21 @@ import pickle
 import json
 import math
 import networkx as nx
-from scipy.spatial import cKDTree
-from scipy.sparse.csgraph import dijkstra
+from graph_utils import extract_paths_data
+from scipy.spatial import cKDTree 
+from scipy.sparse.csgraph import dijkstra 
 from skimage.draw import line
-import matplotlib.pyplot as plt 
-from tqdm import tqdm
+import matplotlib.pyplot as plt  
+from tqdm import tqdm 
 
 # --- CONFIGURATION ---
 BASE_PROJECT_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/iCurb/"
+
+# flag to enable topological pathing
+USE_TOPOLOGICAL_PATHING = True
+MASK_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/records/seg/test"
+ENDPOINT_DIRECTORY = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/records/endpoint/test"
+
 GT_GRAPH_DIR = os.path.join(BASE_PROJECT_DIR, "records", "gt", "gt_graphs_2_RDP") 
 GT_JSON_PATH = os.path.join(BASE_PROJECT_DIR, "dataset_manhattan", "data_split.json")     
 
@@ -33,19 +40,50 @@ class RoadDrawerEnv(gym.Env):
         super().__init__()
         self.split = split
         self.device = device
-        self.heatmap_dir = os.path.join(BASE_PROJECT_DIR, "RL", self.split, "heatmaps")
-        self.gt_graph_dir = GT_GRAPH_DIR 
 
-        # --- CARICAMENTO DATASET ---
-        try:
-            with open(GT_JSON_PATH, 'r') as f:
-                dataset_info = json.load(f)
-                split_key = split if split in dataset_info else 'train'
-                self.file_list = dataset_info[split_key]
-                print(f"--- ENV '{split}' CARICATO: {len(self.file_list)} immagini ---")
-        except Exception as e:
-            print(f"ERRORE JSON: {e}")
-            self.file_list = []
+        if USE_TOPOLOGICAL_PATHING:
+            self.heatmap_dir= MASK_DIR
+            self.endpoint_dir = ENDPOINT_DIRECTORY
+            print(f" --- MODE TOPOLOGICAL PATHING ENABLED: Using heatmaps from {self.heatmap_dir} ---")
+        else:
+            self.heatmap_dir = os.path.join(BASE_PROJECT_DIR, "RL", self.split, "heatmaps")
+            self.gt_graph_dir = GT_GRAPH_DIR 
+            print(f" --- MODE STANDARD PATHING: Using heatmaps from {self.heatmap_dir} ---")
+
+
+        self.file_list = []
+        # --- LOAD DATASET  ---
+        if USE_TOPOLOGICAL_PATHING:
+
+            if os.path.exists(self.endpoint_dir):
+                all_files_raw = os.listdir(self.endpoint_dir)
+                all_files = [os.path.splitext(f)[0] for f in all_files_raw if f.endswith('.png')]
+
+                all_files.sort()
+
+                split_ratio = 0.9
+                split_index = int(len(all_files) * split_ratio)
+
+                if split == 'train':
+                    self.file_list = all_files[:split_index]
+                    print(f"---MODE TOPOLOGICAL PATHING: {len(self.file_list)} training images---")
+                else:
+                    self.file_list = all_files[split_index:]
+                    print(f"---MODE TOPOLOGICAL PATHING: {len(self.file_list)} validation images---")
+            else: 
+                print(f"Error: Endpoint directory {self.end_point_dir} does not exist.")
+            
+
+        else:
+            try:
+                with open(GT_JSON_PATH, 'r') as f:
+                    dataset_info = json.load(f)
+                    split_key = split if split in dataset_info else 'train'
+                    self.file_list = dataset_info[split_key]
+                    print(f"---MODE STANDARD PATHING: {len(self.file_list)} images---")
+            except Exception as e:
+                print(f"ERRORE JSON: {e}")
+                self.file_list = []
 
         enable_overfit = False  #############################################################################################
 
@@ -113,44 +151,66 @@ class RoadDrawerEnv(gym.Env):
         self.global_episode_count = 0
 
     def _filter_dataset(self): 
-
-        print(f"--- pre_ceck dataset ({self.split.upper()}) for valid path ---")
+        print(f"--- pre_check dataset ({self.split.upper()}) for valid path ---")
         print(f"Initial dataset size: {len(self.file_list)} images")
 
         valid_files = []
         discarded_count = 0 
 
-        iteration = tqdm(self.file_list, desc="Filtering dataset for valid paths", unit="images")
+        iteration = tqdm(self.file_list, desc="Filtering dataset", unit="images")
 
         for img_name in iteration:
             try:
-                heatmap_path = os.path.join(self.heatmap_dir, f"{img_name}.npy")
-                graph_path = os.path.join(self.gt_graph_dir, f"{img_name}.pickle")
+                
+                if USE_TOPOLOGICAL_PATHING:
+                    # 1. Check Heatmap (PNG o JPG)
+                    hpath = os.path.join(self.heatmap_dir, f"{img_name}.png")
+                    if not os.path.exists(hpath): 
+                        hpath = os.path.join(self.heatmap_dir, f"{img_name}.jpg")
+                    
+                    # 2. Check Endpoint (PNG o JPG)
+                    epath = os.path.join(self.endpoint_dir, f"{img_name}.png")
+                    if not os.path.exists(epath): 
+                        epath = os.path.join(self.endpoint_dir, f"{img_name}.jpg")
 
-                if not os.path.exists(heatmap_path) or not os.path.exists(graph_path):
-                    discarded_count += 1
-                    continue
-
-                self.heatmap = np.load(heatmap_path)
-                with open(graph_path, 'rb') as f:
-                    self.gt_data = pickle.load(f)
-
-                possible_missions = self._find_all_valid_paths()
-
-                if len(possible_missions) > 0:
+                    
+                    if not os.path.exists(hpath) or not os.path.exists(epath):
+                        discarded_count += 1
+                        continue
+                    
                     valid_files.append(img_name)
-                else:
-                    discarded_count += 1
+                    continue 
+
+                
+                else: 
+                    heatmap_path = os.path.join(self.heatmap_dir, f"{img_name}.npy")
+                    graph_path = os.path.join(self.gt_graph_dir, f"{img_name}.pickle")
+
+                    if not os.path.exists(heatmap_path) or not os.path.exists(graph_path):
+                        discarded_count += 1
+                        continue
+
+                    
+                    self.heatmap = np.load(heatmap_path)
+                    with open(graph_path, 'rb') as f:
+                        self.gt_data = pickle.load(f)
+
+                    possible_missions = self._find_all_valid_paths()
+
+                    if len(possible_missions) > 0:
+                        valid_files.append(img_name)
+                    else:
+                        discarded_count += 1
             
             except Exception as e:
                 discarded_count += 1
                 continue
 
+            # clean memory
             self.heatmap = None 
             self.gt_data = None
 
-            print(f"Valid files found: {len(valid_files)} | Discarded: {discarded_count}", end='\r')
-
+        print(f"Valid files found: {len(valid_files)} | Discarded: {discarded_count}", end='\r')
         return valid_files
     
             
@@ -280,13 +340,21 @@ class RoadDrawerEnv(gym.Env):
             # --- SELEZIONE NUOVO PATH ---
             path_selected_idx = np.random.randint(len(self.available_paths_cache))
             mission_data = self.available_paths_cache[path_selected_idx]
+
+            if USE_TOPOLOGICAL_PATHING:
+                raw_waypoints = mission_data['waypoints']
+                self.mission_path = [np.array(wp) for wp in raw_waypoints]
+            else:
             
-            path_indices = mission_data['path_indices']
-            gt_vertices = np.array(self.gt_data['vertices'])
+                path_indices = mission_data['path_indices']
+                gt_vertices = np.array(self.gt_data['vertices'])
             
-            # Campionamento
-            sparse_indices = self._sample_path_by_distance(path_indices, gt_vertices, WAYPOINT_MIN_DIST)
-            self.mission_path = [gt_vertices[i] for i in sparse_indices]
+                # Campionamento
+                sparse_indices = self._sample_path_by_distance(path_indices, gt_vertices, WAYPOINT_MIN_DIST)
+                self.mission_path = [gt_vertices[i] for i in sparse_indices]
+
+            if len(self.mission_path) < 2:
+                return self.reset()
             
             self.current_pos = self.mission_path[0]
             self.current_wp_index = 1 
@@ -622,15 +690,30 @@ class RoadDrawerEnv(gym.Env):
             self.file_list = self.initial_file_list.copy()
         
         self.current_map_name = np.random.choice(self.file_list)
-        try:
-            hpath = os.path.join(self.heatmap_dir, f"{self.current_map_name}.npy")
-            gpath = os.path.join(self.gt_graph_dir, f"{self.current_map_name}.pickle")
-            self.heatmap = np.load(hpath)
-            with open(gpath, 'rb') as f: self.gt_data = pickle.load(f)
-            self.drawn_nodes = set()
+
+        try: 
+            all_paths = []
+
+
+            if USE_TOPOLOGICAL_PATHING:
+                hpath = os.path.join(self.heatmap_dir, f"{self.current_map_name}.png")
+                self.heatmap = cv2.imread(hpath, cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
+
+                epath = os.path.join(self.endpoint_dir, f"{self.current_map_name}.png")
+                endpoints_img = cv2.imread(epath, cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
+
+                all_paths = extract_paths_data(self.heatmap, endpoints_img)
+                self.gt_data = None
+
+            else: 
+                hpath = os.path.join(self.heatmap_dir, f"{self.current_map_name}.npy")
+                gpath = os.path.join(self.gt_graph_dir, f"{self.current_map_name}.pickle")
+                self.heatmap = np.load(hpath)
+                with open(gpath, 'rb') as f: self.gt_data = pickle.load(f)
+                self.drawn_nodes = set()
             
-            # --- NUOVO: Calcoliamo subito tutti i percorsi disponibili per questa mappa ---
-            all_paths = self._find_all_valid_paths()
+                # --- NUOVO: Calcoliamo subito tutti i percorsi disponibili per questa mappa ---
+                all_paths = self._find_all_valid_paths()
 
             self.original_total_paths = len(all_paths)
 
@@ -640,16 +723,12 @@ class RoadDrawerEnv(gym.Env):
             if not all_paths:
                 self.available_paths_cache = []
                 print(f"[{self.split.upper()}] WARNING: no valid paths found in {self.current_map_name}!") 
-            elif self.split == 'train':
-                
-                self.available_paths_cache = all_paths[:]
-            else:
-               
-                self.available_paths_cache = all_paths[:]
+                self.file_list = [f for f in self.file_list if f != self.current_map_name]
+                self._load_new_map_data()
+                return
             
+            self.available_paths_cache = all_paths[:]
             
-            
-
         except Exception as e:
             print(f"Errore caricamento {self.current_map_name}: {e}")
             self.file_list = [f for f in self.file_list if f != self.current_map_name]

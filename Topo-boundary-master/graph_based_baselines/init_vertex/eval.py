@@ -39,7 +39,7 @@ class valid_dataset(Dataset): # for validation and test
         
         with open(json_path,'r') as jf:
             json_list = json.load(jf)
-        self.file_list = json_list['test']
+        self.file_list = json_list['train'] 
 
 
         relative_image_path = os.path.relpath(args.image_dir, './dataset')
@@ -57,7 +57,7 @@ class valid_dataset(Dataset): # for validation and test
         self.endpoint_list = [os.path.join(args.dataset_dir, relative_endpoint_path, f'{x}.png') for x in self.file_list]
         ##############################################################################
             
-        print('Finish loading the test data set lists {}!'.format(len(self.file_list)))
+        print('Finish loading the test + valid  data set lists {}!'.format(len(self.file_list)))
 
     def __len__(self):
         return len(self.file_list) 
@@ -149,9 +149,11 @@ def val(args,net,dataloader,val_len):
                     #seg_save_path = './records/seg/test/low_f1'
                     #endpoint_save_path = './records/endpoint/test/low_f1'
 
-                    seg_save_path = './records/seg/test'
-                    seg_save_path_skeleton = './records/seg/test/skeleton_test'
-                    endpoint_save_path = './records/endpoint/test'
+                    #seg_save_path = './records/seg/test'
+                    seg_save_path = './records/seg/RL'
+                    #seg_save_path_skeleton = './records/seg/test/skeleton_test'
+                    #endpoint_save_path = './records/endpoint/test'
+                    endpoint_save_path = './records/endpoint/RL'
 
 
                 else:
@@ -159,19 +161,21 @@ def val(args,net,dataloader,val_len):
                     #seg_save_path = './records/seg/test/high_f1'
                     #endpoint_save_path = './records/endpoint/test/high_f1'
                 
-                    seg_save_path = './records/seg/test'
-                    seg_save_path_skeleton = './records/seg/test/skeleton_test'
-                    endpoint_save_path = './records/endpoint/test'
+                    #seg_save_path = './records/seg/test'
+                    seg_save_path = './records/seg/RL'
+                    #seg_save_path_skeleton = './records/seg/test/skeleton_test'
+                    #endpoint_save_path = './records/endpoint/test'
+                    endpoint_save_path = './records/endpoint/RL'
               
                 os.makedirs(seg_save_path, exist_ok=True)
-                os.makedirs(seg_save_path_skeleton, exist_ok=True)
+                #os.makedirs(seg_save_path_skeleton, exist_ok=True)
                 os.makedirs(endpoint_save_path, exist_ok=True)
                
                 
                 
                 Image.fromarray((pre_segs * 255).astype(np.uint8)).convert('RGB').save(os.path.join(seg_save_path, '{}.png'.format(name[0])))
-                Image.fromarray((mask * 255).astype(np.uint8)).convert('RGB').save(os.path.join(seg_save_path, '{}_gt.png'.format(name[0])))
-                Image.fromarray((pre_segs_thresh*255).astype(np.uint8)).convert('RGB').save(os.path.join(seg_save_path_skeleton, '{}_skeleton.png'.format(name[0])))
+                #Image.fromarray((mask * 255).astype(np.uint8)).convert('RGB').save(os.path.join(seg_save_path, '{}_gt.png'.format(name[0])))
+                #Image.fromarray((pre_segs_thresh*255).astype(np.uint8)).convert('RGB').save(os.path.join(seg_save_path_skeleton, '{}_skeleton.png'.format(name[0])))
                 Image.fromarray((pre_endpoint * 255).astype(np.uint8)).convert('RGB').save(os.path.join(endpoint_save_path, '{}.png'.format(name[0])))
             
             else:
@@ -225,7 +229,7 @@ if __name__ == '__main__':
     # ############################################################### #
     
     # 1. Definisci il percorso del checkpoint in una variabile
-    checkpoint_path = "./checkpoints/seg_pretrain_gaussian_PMM-NY_efficentnet_b4_1.6.pth"
+    checkpoint_path = "./checkpoints/seg_pretrain_gaussian_manhattan_efficentnet_b4_1.6_RL.pth"
     print(f"Tentativo di caricamento del checkpoint da: {checkpoint_path}")
 
     if os.path.exists(checkpoint_path):

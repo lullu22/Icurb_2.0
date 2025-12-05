@@ -1,1 +1,1 @@
-python train.py 
+python train.py --loss_type 'gaussian' --gaussian_sigma 1.6 
