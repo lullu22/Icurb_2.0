@@ -9,6 +9,10 @@ from scipy.spatial import cKDTree
 CLOSE_LOOP = True 
 # Margin in pixels to consider a node as "on the border"
 BORDER_MARGIN = 15 
+# Flag to enable Meta-Graph logic for ordering waypoints
+META_GRAPH_LOGIC = False
+# Distance threshold to consider primary and secondary nodes as distinct
+DISTANCE_THRESHOLD_PS = 25.0
 # =================================================
 
 def is_on_border(node, shape, margin):
@@ -34,65 +38,131 @@ def build_pixel_graph(skeleton):
             for dc in [-1, 0, 1]:
                 if dr == 0 and dc == 0:
                     continue
-                nr, nc = r + dr, c + dc
+                nr, nc = r + dr, c + dc 
                 if (nr, nc) in node_set:
                     weight = np.sqrt(dr**2 + dc**2)
                     G.add_edge((r, c), (nr, nc), weight=weight)
     return G
 
-def get_sequential_order(G, component_nodes):
-    """
-    Reorders nodes using Meta-Graph logic.
-    Identifies if it's a line or a loop and orders waypoints accordingly.
-    """
-    # --- SORTING LOGIC ---
-    MetaG = nx.Graph()
-    MetaG.add_nodes_from(component_nodes)
-    node_set = set(component_nodes) 
-    n = len(component_nodes)
-    
-    # Build Meta-Graph based on reachability via skeleton
-    for i in range(n):
-        u = component_nodes[i] 
-        try: 
-            paths = nx.single_source_dijkstra_path(G, u, weight='weight')
-        except: 
-            continue
+if META_GRAPH_LOGIC:
+    # Meta-Graph Logic
+    def get_sequential_order(G, component_nodes):
+        """
+        Reorders nodes using Meta-Graph logic.
+        Identifies if it's a line or a loop and orders waypoints accordingly.
+        """
+        # --- SORTING LOGIC ---
+        MetaG = nx.Graph()
+        MetaG.add_nodes_from(component_nodes)
+        node_set = set(component_nodes) 
+        n = len(component_nodes)
+        
+        # Build Meta-Graph based on reachability via skeleton
+        for i in range(n):
+            u = component_nodes[i] 
+            try: 
+                paths = nx.single_source_dijkstra_path(G, u, weight='weight')
+            except: 
+                continue
 
-        for j in range(i + 1, n):
-            v = component_nodes[j]
-            if v not in paths: continue
-            
-            path_set = set(paths[v])
-            intermediaries = path_set.intersection(node_set)
-            
-            # Direct connection check (only u and v as key nodes in the path)
-            if len(intermediaries) == 2:
-                MetaG.add_edge(u, v, weight=len(paths[v]))
+            for j in range(i + 1, n):
+                v = component_nodes[j]
+                if v not in paths: continue
+                
+                path_set = set(paths[v])
+                intermediaries = path_set.intersection(node_set)
+                
+                # Direct connection check (only u and v as key nodes in the path)
+                if len(intermediaries) == 2:
+                    MetaG.add_edge(u, v, weight=len(paths[v]))
 
-    # Determine start node based on graph degree
-    degrees = dict(MetaG.degree())
-    endpoints = [k for k, d in degrees.items() if d == 1]
-    
-    start_node = None
-    if endpoints:
-        # LINE Topology: Start from one endpoint
-        endpoints = sorted(endpoints, key=lambda x: (x[0], x[1]))
-        start_node = endpoints[0] 
-    else:
-        # LOOP Topology: Start from the top-leftmost node
-        if len(component_nodes) > 0:
-            sorted_nodes = sorted(component_nodes, key=lambda x: (x[0], x[1]))
-            start_node = sorted_nodes[0]
-        else: 
+        # Determine start node based on graph degree
+        degrees = dict(MetaG.degree())
+        endpoints = [k for k, d in degrees.items() if d == 1]
+        
+        start_node = None
+        if endpoints:
+            # LINE Topology: Start from one endpoint
+            endpoints = sorted(endpoints, key=lambda x: (x[0], x[1]))
+            start_node = endpoints[0] 
+        else:
+            # LOOP Topology: Start from the top-leftmost node
+            if len(component_nodes) > 0:
+                sorted_nodes = sorted(component_nodes, key=lambda x: (x[0], x[1]))
+                start_node = sorted_nodes[0]
+            else: 
+                return []
+
+        return list(nx.dfs_preorder_nodes(MetaG, source=start_node))
+else:
+    # greedy Nearest Neighbor Logic
+    def get_sequential_order(G, component_nodes):
+
+        n = len(component_nodes)
+        # Matrix NxN of distances initialized to Infinity
+        dist_matrix = np.full((n, n), np.inf)
+        np.fill_diagonal(dist_matrix, 0)
+
+
+        # Fill the matrix with real shortest path distances
+        for i in range(n):
+            for j in range(i + 1, n):
+                try:
+                    # Calculate shortest path distance in the pixel graph
+                    u = component_nodes[i]
+                    v = component_nodes[j]
+                    d = nx.shortest_path_length(G, u, v, weight='weight')
+                    
+                    # The matrix is symmetric (distance A->B = B->A)
+                    dist_matrix[i, j] = d
+                    dist_matrix[j, i] = d
+                except nx.NetworkXNoPath:
+                    pass  # Leave as infinity if no path exists
+
+        # Find the most distant node pair
+        flat_idx = np.argmax(dist_matrix)
+        i_start, j_end = np.unravel_index(flat_idx, dist_matrix.shape)
+
+        # IF THE GRAPH IS DISCONNECTED: Exit 
+        if dist_matrix[i_start, j_end] == np.inf:
             return []
 
-    return list(nx.dfs_preorder_nodes(MetaG, source=start_node))
+        # Choose deterministic start (e.g., smallest pixel coordinates)
+        if component_nodes[i_start] < component_nodes[j_end]:
+            start_idx = i_start
+        else:
+            start_idx = j_end
+        
+
+        ordered_indices = [start_idx]
+        visited = {start_idx}
+        curr_idx = start_idx
+
+        while len(ordered_indices) < n:
+            # 1. Get distances from current node
+            dists = dist_matrix[curr_idx].copy()
+            
+            # 2. Mask visited nodes
+            dists[list(visited)] = np.inf
+            
+            # 3. Find nearest unvisited node
+            next_idx = np.argmin(dists)
+            
+            # stop if no reachable nodes remain
+            if dists[next_idx] == np.inf:
+                break
+                
+            # 4. move to next node
+            ordered_indices.append(next_idx)
+            visited.add(next_idx)
+            curr_idx = next_idx
+        
+        return [component_nodes[i] for i in ordered_indices]
 
 def process_single_component(G, nodes_to_visit, image_shape):
     """ Processes a single connected component and returns full pixel path + ordered waypoints. """
     
-    # 1. Get Ordered Waypoints (Your targets!)
+    # 1. Get Ordered Waypoints 
     try:
         ordered_wps = get_sequential_order(G, nodes_to_visit)
     except Exception:
@@ -146,6 +216,7 @@ def extract_paths_data(heatmap, endpoints_map):
         results: List of dictionaries. Each dict contains:
                  - 'pixels': list of (row, col) tuples for the full path
                  - 'waypoints': list of (row, col) tuples for KEY TARGETS
+                 - 'waypoint_types': list of integers (0=primary, 1=secondary)
     """
     H, W = heatmap.shape
     
@@ -157,23 +228,62 @@ def extract_paths_data(heatmap, endpoints_map):
     # Build graph on the full image skeleton
     G = build_pixel_graph(skel)
 
-    # 2. Find target nodes (Endpoints)
-    detected_nodes = peak_local_max(endpoints_map, min_distance=5, threshold_abs=0.2, exclude_border=False)
-    
     skeleton_nodes = np.array(list(G.nodes()))
-    if len(skeleton_nodes) == 0: return []
+    if len(skeleton_nodes) == 0:
+        return []
     
-    # 3. Snap Endpoints to Skeleton
+    # Build KD-Tree 
     tree = cKDTree(skeleton_nodes)
-    # Search for nearest skeleton pixel within 15 pixels
-    _, indices = tree.query(detected_nodes, distance_upper_bound=10.0)
+
+    # 2. Find target nodes (Endpoint map )
+    primary_nodes = peak_local_max(endpoints_map, min_distance=3, threshold_abs=0.1, exclude_border=False)
+
+    snapped_primary_nodes = []
+    if len(primary_nodes) > 0:
+        # Snap to nearest skeleton pixel within 25 pixels
+        _, indices = tree.query(primary_nodes, distance_upper_bound=25.0)
+        
+        for idx in indices:
+            if idx < len(skeleton_nodes): # If valid neighbor found
+                snapped_primary_nodes.append(tuple(skeleton_nodes[idx]))
+
+
+    # 3. Find secondary target nodes (from heatmap peaks)
+    secondary_nodes = peak_local_max(heatmap, min_distance=60, threshold_abs=0.6, exclude_border=False)
+
+    snapped_secondary_nodes = []
+    if len(secondary_nodes) > 0:
+        # Snap to nearest skeleton pixel within 10 pixels
+        _, indices = tree.query(secondary_nodes, distance_upper_bound=10.0)
+        
+        for idx in indices:
+            if idx < len(skeleton_nodes): # If valid neighbor found
+                snapped_secondary_nodes.append(tuple(skeleton_nodes[idx]))
+        
+    unique_primary_nodes = set(snapped_primary_nodes)
+    unique_secondary_nodes = set(snapped_secondary_nodes)
+
+    final_nodes_map = {}
+    for first_node in unique_primary_nodes:
+        final_nodes_map[first_node] = 'primary'
+
+
+    if len(unique_primary_nodes) > 0:
+
+        primary_tree = cKDTree(list(unique_primary_nodes))
+
+        for second_node in unique_secondary_nodes:
+            dist, _ = primary_tree.query(second_node)
+            if dist >= DISTANCE_THRESHOLD_PS:
+                final_nodes_map[second_node] = 'secondary'
     
-    mapped_nodes = []
-    num_total_nodes = len(skeleton_nodes)
-    for idx in indices:
-        if idx < num_total_nodes: # If valid neighbor found
-            mapped_nodes.append(tuple(skeleton_nodes[idx]))
-    mapped_nodes = list(set(mapped_nodes)) # Remove duplicates
+    else: 
+        for second_node in unique_secondary_nodes:
+            final_nodes_map[second_node] = 'secondary'
+
+    all_target_nodes = list(final_nodes_map.keys())
+    
+   
 
     # 4. Process Connected Components
     # (Separates different roads that do not touch)
@@ -182,7 +292,7 @@ def extract_paths_data(heatmap, endpoints_map):
 
     for comp in components:
         # Take only mapped nodes belonging to this component/road
-        nodes_in_comp = [n for n in mapped_nodes if n in comp]
+        nodes_in_comp = [n for n in all_target_nodes if n in comp]
         
         # We need at least 2 points (start/end) to make a path
         if len(nodes_in_comp) < 2: 
@@ -192,9 +302,25 @@ def extract_paths_data(heatmap, endpoints_map):
         
         # Filter out tiny paths (noise)
         if len(path_pixels) > 10:
+
+            # Get waypoint types for potential further use
+            wp_types = [] 
+            for wp in waypoints:
+                # Recuperiamo il tipo dalla mappa creata prima
+                # Usiamo .get() per sicurezza, default 'secondary'
+                raw_type = final_nodes_map.get(wp, 'secondary') 
+                
+                # Convertiamo in numeri per comodità nel plot: 
+                # 0 = Primary (Rosso), 1 = Secondary (Blu)
+                if raw_type == 'primary':
+                    wp_types.append(0)
+                else:
+                    wp_types.append(1)
+
             results.append({
                 'pixels': path_pixels,     # Full road (pixel by pixel)
-                'waypoints': waypoints     # YOUR KEY TARGETS (ordered)
+                'waypoints': waypoints,
+                'waypoint_types': wp_types   
             })
 
     return results

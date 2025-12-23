@@ -28,6 +28,12 @@ def get_parser():
     #process(**conf)
     ############################################################
 
+    ######## dataset_prova#######################################
+    with open('./dataset_prova/config_dir.yml', 'r') as f:
+       conf = yaml.safe_load(f.read())    # load the config file
+    process(**conf)
+    ############################################################
+
     ######## dataset_stoccarda #######################################
     #with open('./dataset_stoccarda/config_dir.yml', 'r') as f:
     #    conf = yaml.safe_load(f.read())    # load the config file
@@ -35,9 +41,9 @@ def get_parser():
     ############################################################
 
     ######## dataset_manhattan #######################################
-    with open('./dataset_manhattan/config_dir.yml', 'r') as f:
-        conf = yaml.safe_load(f.read())    # load the config file
-    process(**conf)
+    #with open('./dataset_manhattan/config_dir.yml', 'r') as f:
+    #   conf = yaml.safe_load(f.read())    # load the config file
+    #process(**conf)
     ############################################################
     
     
@@ -77,6 +83,6 @@ def update_dir_seg(args):
     check_and_add_dir('./checkpoints',clear=False)
     check_and_add_dir('./records/seg/tensorboard')
     check_and_add_dir('./records/seg/valid')
-    check_and_add_dir('./records/seg/test')
-    check_and_add_dir('./records/endpoint/test')
+    check_and_add_dir('./records/seg/test', clear = False)
+    check_and_add_dir('./records/endpoint/test', clear = False)
     check_and_add_dir('./records/endpoint/vertices')

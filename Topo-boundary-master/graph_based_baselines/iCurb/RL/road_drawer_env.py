@@ -12,6 +12,7 @@ from scipy.spatial import cKDTree
 from scipy.sparse.csgraph import dijkstra 
 from skimage.draw import line
 import matplotlib.pyplot as plt  
+from matplotlib.collections import LineCollection
 from tqdm import tqdm 
 
 # --- CONFIGURATION ---
@@ -19,8 +20,8 @@ BASE_PROJECT_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundar
 
 # flag to enable topological pathing
 USE_TOPOLOGICAL_PATHING = True
-MASK_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/records/seg/test"
-ENDPOINT_DIRECTORY = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/records/endpoint/test"
+MASK_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/records/seg/test_PMM-NY"
+ENDPOINT_DIRECTORY = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/records/endpoint/test_PMM-NY"
 
 GT_GRAPH_DIR = os.path.join(BASE_PROJECT_DIR, "records", "gt", "gt_graphs_2_RDP") 
 GT_JSON_PATH = os.path.join(BASE_PROJECT_DIR, "dataset_manhattan", "data_split.json")     
@@ -36,10 +37,17 @@ SEGMENT_LENGTH = 4
 WAYPOINT_MIN_DIST = 10.0
 
 class RoadDrawerEnv(gym.Env):
-    def __init__(self, split='train', device='cpu'):
+    def __init__(self, split='train', device='cpu', enable_reverse_learning = True):
         super().__init__()
         self.split = split
         self.device = device
+
+        self.enable_reverse_learning = enable_reverse_learning
+
+        if self.enable_reverse_learning: 
+            print("MODE: REVERSED LEARNING")
+        else: 
+            print("MODE: STANDARD RECOVERY")
 
         if USE_TOPOLOGICAL_PATHING:
             self.heatmap_dir= MASK_DIR
@@ -107,8 +115,19 @@ class RoadDrawerEnv(gym.Env):
         
         self.initial_file_list = self.file_list.copy()
 
-        #self.action_space = spaces.Discrete(len(ANGULAR_ACTIONS_DEGREES) + 1) 
-        self.action_space = spaces.Discrete(len(ANGULAR_ACTIONS_DEGREES)) #without stop action
+        #self.action_space = spaces.Discrete(len(ANGULAR_ACTIONS_DEGREES) + 1) # WITH STOP ACTION 
+
+        self.angular_actions = ANGULAR_ACTIONS_DEGREES
+        self.n_angles = len(self.angular_actions)
+        
+        if self.enable_reverse_learning:
+            
+            self.action_space = spaces.Discrete(self.n_angles * 2)
+        else:
+           
+            self.action_space = spaces.Discrete(self.n_angles)
+
+
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(2, CROP_SIZE, CROP_SIZE), dtype=np.float32)
         
         self.current_pos = None
@@ -142,13 +161,29 @@ class RoadDrawerEnv(gym.Env):
         if self.split == 'train':
             self.max_failures = 100 
         else: 
-            self.max_failures = 0    #################################################################
+            self.max_failures = 0   
 
-        # conuter of roads drawn
+        # counter of roads drawn
         self.off_road_counter = 0
-        self.steps_penalty = -0.005
-
+        self.steps_penalty = -0.01
         self.global_episode_count = 0
+
+        # RECOVERY CONFIGURATION 
+        #---------------------------------#
+        self.max_retries = 3           
+        self.recovery_penalty = -1.0  
+        self.retries_left = 0
+        self.last_safe_pos = None     
+        self.last_safe_heading = 0.0
+        self.recovery_events = []     
+        #---------------------------------#
+
+        # Report variables 
+        self.session_attempts = 0       
+        self.session_history = []
+
+        self.trajectory = []
+        
 
     def _filter_dataset(self): 
         print(f"--- pre_check dataset ({self.split.upper()}) for valid path ---")
@@ -273,7 +308,13 @@ class RoadDrawerEnv(gym.Env):
         if hasattr(self, 'current_segment') and len(self.current_segment) > 1:
             self.last_finished_segment = list(self.current_segment)
             self.last_mission_path = list(self.mission_path)
-            self.last_target = self.current_target
+            self.last_target = self.current_target 
+            self.last_recovery_events = list(getattr(self, 'recovery_events', []))
+
+            if hasattr(self, 'trajectory'):
+                self.last_trajectory = list(self.trajectory)
+            else:
+                self.last_trajectory = []
 
             if hasattr(self,'predicted_graph') and self.predicted_graph is not None:
                 self.last_predicted_graph = self.predicted_graph
@@ -284,16 +325,57 @@ class RoadDrawerEnv(gym.Env):
                 self.last_heatmap = self.heatmap.copy()
 
         super().reset(seed=seed)
+
+        self.recovery_events = []
         
         
         restor_old_mission = False
+
         if self.mission_cache is not None: 
             if (not self.last_run_success) and (self.consecutive_failures < self.max_failures): 
                 restor_old_mission = True 
                 self.consecutive_failures += 1
             else : 
-                self.consecutive_failures = 0 
-                self.last_run_success = False 
+
+                if len(self.session_history) > 0:
+                    n = len(self.session_history)
+                    
+                   # compute total means
+                    all_steps = [x['steps'] for x in self.session_history]
+                    all_recs = [x['recoveries'] for x in self.session_history]
+                    
+                    avg_steps_tot = np.mean(all_steps)
+                    avg_recs_tot = np.mean(all_recs)
+                    
+                    # trend analysis
+                    window = max(1, int(n * 0.1)) 
+                    
+                    start_steps = np.mean(all_steps[:window])
+                    end_steps = np.mean(all_steps[-window:])
+                    
+                    start_recs = np.mean(all_recs[:window])
+                    end_recs = np.mean(all_recs[-window:])
+                    
+                    # Indicatori visivi
+                    trend_steps = "increase" if end_steps > start_steps else "decrese"
+                    trend_recs = "decrease" if end_recs < start_recs else "increase"
+                    
+                    result = "SUCCESS" if self.last_run_success else "FAIL"
+
+                    print(f"\n[MAP REPORT] Map: {self.current_map_name} | Result: {result}")
+                    print(f" -> Attempts: {n}")
+                    print(f" -> GLOBAL AVG: Steps={avg_steps_tot:.1f}, Recs={avg_recs_tot:.1f}")
+                    print(f" -> TREND (First {window} vs Last {window}):")
+                    print(f"    - Steps: {start_steps:.1f} -> {end_steps:.1f} ({trend_steps})")
+                    print(f"    - Recs:  {start_recs:.1f} -> {end_recs:.1f} ({trend_recs})")
+                    print("--------------------------------------------------", flush=True)
+                # =============================================================
+
+                # Reset for next map
+                self.consecutive_failures = 0
+                self.last_run_success = False
+                self.session_attempts = 0
+                self.session_history = []
 
         if restor_old_mission: 
             data = self.mission_cache
@@ -304,6 +386,19 @@ class RoadDrawerEnv(gym.Env):
             self.mission_path = list(data['path'])
             self.current_pos = np.array(data['start_pos'])
             self.current_heading = data['start_heading']
+
+            # Recovery 
+
+            # ==================================================
+            self.retries_left = self.max_retries
+            self.last_safe_pos = self.current_pos.copy()
+            self.last_safe_heading = self.current_heading
+
+            self.recovery_events = []
+            # ==================================================
+
+
+
             self.current_wp_index = 1 if len(self.mission_path) > 1 else 0 
             self.current_target = self.mission_path[self.current_wp_index]
             cy, cx = int(self.current_pos[0]), int(self.current_pos[1])
@@ -312,6 +407,8 @@ class RoadDrawerEnv(gym.Env):
             self.steps_in_episode = 0
             self.visited_pixels = set()          
             self.visited_pixels.add((cy, cx))    
+
+            self.trajectory = [(cy, cx, False)] # (position (y,x), is_reversing ( True or False))
 
             ## initialize variables for dynamic graphs only in validation/test
             if self.split != 'train':
@@ -330,7 +427,6 @@ class RoadDrawerEnv(gym.Env):
         # NEW MISSION
         # -------------------------------------------------------
         
-    
         self._load_new_map_data()
         self.global_episode_count += 1
         
@@ -380,9 +476,19 @@ class RoadDrawerEnv(gym.Env):
             self.current_wp_index = 0
             base_angle = np.random.uniform(0, 6.28)
 
-        # Init Stato
+        # Init State
         self.current_heading = base_angle + np.random.uniform(-0.3, 0.3)
-        
+
+
+        # Recovery 
+        # ==================================================
+        self.retries_left = self.max_retries
+        self.last_safe_pos = self.current_pos.copy()
+        self.last_safe_heading = self.current_heading
+
+        self.recovery_events = []
+        # ==================================================
+
         self.mission_cache = {
             'map_name': self.current_map_name,
             'start_pos': self.current_pos,
@@ -399,6 +505,9 @@ class RoadDrawerEnv(gym.Env):
         self.drawn_nodes.add((cy, cx))
         self.steps_in_episode = 0
 
+        self.trajectory = [(cy, cx, False)] # (position (y,x), is_reversing ( True or False))
+
+
         if self.split != 'train':
             self.predicted_graph = nx.Graph() # Crea nuovo grafo vuoto
             start_node_pos = (float(self.current_pos[0]), float(self.current_pos[1]))
@@ -413,59 +522,66 @@ class RoadDrawerEnv(gym.Env):
         
 
     def step(self, action):
+
+        pos_before_move = self.current_pos.copy()
+
+
+        # save distance from waypoint 
+        prev_dist_wp = np.linalg.norm(pos_before_move - self.current_target)
+
+        # we compute the distance from the safe point before starting moving 
+        if self.last_safe_pos is not None:
+            prev_dist_from_safety = np.linalg.norm(pos_before_move - self.last_safe_pos) 
+        else: 
+            prev_dist_from_safety = 0.0
+
         
+
         done = False
         truncated = False
-        
-        reward = self.steps_penalty  # small penalty for each step taken 0,05
+        reward = self.steps_penalty  # small penalty for each step taken 0,01
 
         
         y, x = self.current_pos
         H, W = self.heatmap.shape
-        dist_to_wp = np.linalg.norm(self.current_pos - self.current_target)
+       
 
-        """
-        # ---------------------------------------------------------
-        # 1.  (STOP ACTION) - "FORCED EXPLORATION"
-        # ---------------------------------------------------------
-        if action == stop_action_index:
-            # A. CHECK VITTORIA (Target FINALE raggiunto?)
-            
-            is_last_wp = (self.current_wp_index == len(self.mission_path) - 1)
-            
-            if is_last_wp and dist_to_wp < 15.0:
-                reward += 100.0 # JACKPOT
-                done = True
-                self.last_run_success = True 
-                return self._get_observation(), reward, done, truncated, {}
+        current_step_length = SEGMENT_LENGTH 
+        current_angle_idx = 0
+        is_reversing = False
 
-            # B. CHECK TEMPO MINIMO (Es. 400 Step)
-            MIN_STEPS_TO_STOP = 400
-            
-            if self.steps_in_episode < MIN_STEPS_TO_STOP:
-                # TENTATIVO DI STOP PREMATURO -> VIETATO!
-                reward += -0.05  # Penalità: "È troppo presto per arrendersi!"
-                done = False   # FORZIAMO A CONTINUARE
-                self.steps_in_episode += 1 # Il tempo passa
-            else:
-                # TEMPO MINIMO SUPERATO -> RESA ACCETTATA
-                # L'agente ha provato per 400 passi, non ce l'ha fatta, vuole uscire.
-                reward += -5.0 # penalità per non aver finito la missione
-                done = True    
-            
-            return self._get_observation(), reward, done, truncated, {}
-        # ---------------------------------------------------------
-        """
-        # 2. MOVIMENTO (Il resto rimane uguale)
-        angle_deg = ANGULAR_ACTIONS_DEGREES[action]
+        if self.enable_reverse_learning: 
+
+            if action < self.n_angles: 
+                #forward 
+                current_angle_idx = action 
+                current_step_length = SEGMENT_LENGTH
+
+            else: 
+                #backward
+                current_angle_idx = action - self.n_angles
+                current_step_length = -(SEGMENT_LENGTH * 0.5)
+                is_reversing = True
+
+        else: 
+            current_angle_idx = action 
+            current_step_length = SEGMENT_LENGTH
+            is_reversing = False
+
+        # 2. Step
+        angle_deg = self.angular_actions[current_angle_idx]
         delta = math.radians(angle_deg)
         new_heading = self.current_heading + delta
-        target_y = y + math.sin(new_heading) * SEGMENT_LENGTH
-        target_x = x + math.cos(new_heading) * SEGMENT_LENGTH
+
+        target_y = y + math.sin(new_heading) * current_step_length
+        target_x = x + math.cos(new_heading) * current_step_length
+
         
         rr, cc = line(int(round(y)), int(round(x)), int(round(target_y)), int(round(target_x))) # we take the line between the target e the actual position
         valid = (rr >= 0) & (rr < H) & (cc >= 0) & (cc < W)
         rr, cc = rr[valid], cc[valid]
+
+
 
         new_pixels_count = 0
         for r, c in zip(rr, cc):
@@ -476,24 +592,28 @@ class RoadDrawerEnv(gym.Env):
 
 
 
-        # Muro
+        # Limit border 
+        #==================================================
         if len(rr) == 0:
-
+            
             if self.steps_in_episode < 5: 
                 reward += -0.01
                 done = False 
                 self.steps_in_episode += 1
             else:
-                reward += -0.05; 
+                reward += -0.1; 
                 done = True
 
             return self._get_observation(), reward, done, truncated, {}
+        #==================================================
 
         new_y, new_x = rr[-1], cc[-1] #  position of last pixel of the line 
         self.current_pos = np.array([new_y, new_x])
         self.current_heading = new_heading
+
+        self.trajectory.append((new_y, new_x, is_reversing))
         
-        # Aggiornamento Traccia
+        # update drawn segment and nodes 
         for r, c in zip(rr, cc):
             coord = (int(r), int(c))
             self.current_segment.append(coord)
@@ -501,8 +621,8 @@ class RoadDrawerEnv(gym.Env):
             
         self.steps_in_episode += 1
 
-        # logic for construction of graph
-
+        # GRAPH CONSTRUCTION 
+        # ==================================================
         if self.predicted_graph is not None:
 
             last_node_pos = self.predicted_graph.nodes[self.last_node_id]['pos']
@@ -525,12 +645,21 @@ class RoadDrawerEnv(gym.Env):
                 self.predicted_graph.add_edge(self.last_node_id, new_id, weight=dist_from_last_node)
                 #update last node id
                 self.last_node_id = new_id
+        #===================================================
 
-
-        # REWARD MOVIMENTO
+        
+        # REWARD AND RECOVERY 
+        # ==================================================
         avg_intensity = np.mean(self.heatmap[rr, cc]) # average intensity of the line 
         new_dist_wp = np.linalg.norm(self.current_pos - self.current_target)
-        dist_impr = dist_to_wp - new_dist_wp # distance from wp (positive ok - negative penalty)
+
+        progress_to_target = prev_dist_wp- new_dist_wp
+
+        if self.last_safe_pos is not None: 
+            new_dist_from_safety = np.linalg.norm(self.current_pos - self.last_safe_pos)
+            recovery_progress = prev_dist_from_safety - new_dist_from_safety
+        else: 
+            recovery_progress = 0.0
 
         # directional reward
         vec_to_wp = self.current_target - self.current_pos
@@ -541,27 +670,86 @@ class RoadDrawerEnv(gym.Env):
 
         if avg_intensity < SAFE_THRESHOLD:
 
+            self.off_road_counter += 1
             reward += -0.1 * new_pixels_count
          
-            self.off_road_counter += 1
+            if self.enable_reverse_learning: 
+               
+                if recovery_progress > 0.05: 
 
-            if self.off_road_counter >= 3 and self.steps_in_episode > 20:
-                reward += -0.5 
-                done = True 
-            else: 
-                done = False
+                    if is_reversing: 
+                        pain = 0.05 
+
+                    else: 
+                        pain = 0.1
+                        
+                else: 
+                    pain = 0.5 + (0.1 * self.off_road_counter)
                     
+                limit = 20
+                reward -= pain 
+
+                if self.off_road_counter >= limit:
+                    reward -= 2.0 
+                    done = True  
+
+            else:
+
+                if self.off_road_counter >= 3 :
+
+                    # Recovery logic
+                    if self.retries_left >0:
+
+                        self.retries_left -= 1
+                        reward += self.recovery_penalty
+
+                        self.recovery_events.append((self.last_safe_pos[0], self.last_safe_pos[1], self.retries_left)) # (y, x, retries left)
+
+                        self.current_pos = self.last_safe_pos.copy()
+                        self.current_heading = self.last_safe_heading
+                        self.off_road_counter = 0
+
+                        #print(f"DEBUG: Recovery used! Left: {self.retries_left}", flush= True)
+
+                    else:
+                        reward += -0.5 
+                        done = True 
+           
         else:
-            # Sulla strada
-            r_int = (avg_intensity * new_pixels_count) * 0.5
-            r_nav = (directional_bonus-0.5) * 2.0
+
+            self.last_safe_pos = self.current_pos.copy()
+            self.last_safe_heading = self.current_heading
+
+        
+            self.off_road_counter = 0
+
+            if self.enable_reverse_learning and is_reversing: 
+                reward += -1.0
+
+            r_int = 0.0
+            r_nav = 0.0
+            r_progress = 0.0
+
+
+            if  self.enable_reverse_learning: 
+                r_progress = min(progress_to_target,1) 
+
+                if r_progress > 0.0: 
+                    r_int = (avg_intensity * new_pixels_count) * 0.1
+                    r_nav = (directional_bonus-0.5) 
+            else: 
+
+                r_int = (avg_intensity * new_pixels_count) * 0.5
+                r_nav = (directional_bonus-0.5) * 2.0
+
+        
             r_stagnation = 0.0 
-            if new_pixels_count == 0: 
-                # aggiungiamo una penalty   
+
+            if new_pixels_count == 0:   
                 r_stagnation = -0.5
 
-            reward += (r_int + r_nav +r_stagnation)/10
-            self.off_road_counter = 0
+            reward += (r_int + r_nav + r_stagnation + r_progress)/10
+            
             
             # Checkpoint Waypoint 
             if new_dist_wp < 15.0:
@@ -572,15 +760,28 @@ class RoadDrawerEnv(gym.Env):
                     self.last_run_success = True 
                     
                 else:
-                    # Waypoint intermedio 
+                    # partial waypoint
                     reward += 1.5
                     self.current_wp_index += 1
                     self.current_target = self.mission_path[self.current_wp_index]
             
+        ## anti-camping rule
+        start_pos = self.mission_path[0] 
+        dist_from_start = np.linalg.norm(self.current_pos - start_pos)
 
+        if self.steps_in_episode > 20 and dist_from_start < 15.0:
+            reward += -10.0  
+            done = True    
 
         if self.steps_in_episode >= self.max_steps: 
             done = True
+
+        if done: 
+            used = self.max_retries - self.retries_left
+            self.session_attempts += 1
+            self.session_history.append({'steps': self.steps_in_episode, 'recoveries': used})
+
+  
 
         #if self.steps_in_episode % 50 == 0:
         #    obs = self._get_observation()
@@ -735,88 +936,141 @@ class RoadDrawerEnv(gym.Env):
             self._load_new_map_data()
 
     def render_frame(self, save_path=None, final_steps=None):
-        """
-        Renderizza lo stato. 
-        Se l'episodio è appena stato resettato (Step 0), 
-        mostra il 'Fantasma' dell'episodio precedente SULLO SFONDO CORRETTO.
-        """
-        if self.current_pos is None: return
         
-        # --- SELEZIONE DATI DA VISUALIZZARE ---
+        if self.current_pos is None: return
+       
         use_ghost = False
-        # Se siamo all'inizio E abbiamo dati in memoria
+        # If we are at the start AND have data in memory (from previous episode)
         if len(self.current_segment) <= 1 and len(self.last_finished_segment) > 1 and self.last_heatmap is not None:
             use_ghost = True
 
         if use_ghost:
-            # Usiamo i dati del passato
+            # --- PAST DATA (GHOST) ---
             heatmap_to_show = self.last_heatmap
+            traj_data = self.last_trajectory
             segment_to_plot = self.last_finished_segment
             path_to_plot = self.last_mission_path
             tgt_to_plot = self.last_target
+            
+            # Retrieve the ghost graph
+            graph_to_plot = getattr(self, 'last_predicted_graph', None)
+            rec_events = getattr(self, 'last_recovery_events', [])
+
             color_line = 'magenta'
+            col_fwd = 'lime'     
+            col_rev = 'red'
             label_txt = f'Finished' 
         else:
-            # Usiamo i dati vivi
+            # --- CURRENT DATA (LIVE) ---
             heatmap_to_show = self.heatmap
+            traj_data = getattr(self, 'trajectory', [])
             segment_to_plot = self.current_segment
             path_to_plot = self.mission_path
             tgt_to_plot = self.current_target
+            
+            # Retrieve the live graph
+            graph_to_plot = getattr(self, 'predicted_graph', None)
+            rec_events = getattr(self, 'recovery_events', [])
+
             color_line = 'cyan'
+            col_fwd = 'line'
+            col_rev = 'red'
             label_txt = 'Live'
 
-        # --- INIZIO PLOT ---
-        plt.figure(figsize=(10, 10))
-        H, W = heatmap_to_show.shape
-        
-        plt.imshow(heatmap_to_show, cmap='plasma', vmin=0, vmax=1)
+        # PLOT - DUAL PANEL SETUP
+        fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+        ax1, ax2 = axes[0], axes[1]
 
+        steps_val = final_steps if final_steps else self.steps_in_episode
+
+        ax1.set_title(f"GEOMETRY (Standard) | {label_txt} | Steps: {steps_val}")
+        ax2.set_title(f"BEHAVIOR (Red=Reverse) | {label_txt}")
+
+        # --- LOOP FOR COMMON ELEMENTS ON BOTH GRAPHS ---
+        # (Here we draw everything that shouldn't change: background, graph, target, etc.)
+        for ax in axes:
+            ax.axis('off')
+            ax.imshow(heatmap_to_show, cmap='plasma', vmin=0, vmax=1) # Using plasma for visibility
+
+            
+            # 2. MISSION PATH , connection of waypoints
+            if len(path_to_plot) > 0:
+                py, px = zip(*path_to_plot)
+                ax.plot(px, py, c='white', linestyle='--', alpha=0.5)
+                ax.scatter(px, py, c='white', s=25, alpha=0.6, zorder=8)
+
+            # 3. TARGET
+            if tgt_to_plot is not None:
+                if not use_ghost:
+                    ax.plot([self.current_pos[1], tgt_to_plot[1]], 
+                             [self.current_pos[0], tgt_to_plot[0]], c='red', ls=':', alpha=0.7)
+                
+                hit_box = plt.Circle((tgt_to_plot[1], tgt_to_plot[0]), 15.0, color='lime', fill=False, linewidth= 0.5,linestyle = "--", zorder=12)
+                ax.add_patch(hit_box)
+
+            # 4. RECOVERY EVENTS (COLORED Xs)
+            for (ry, rx, lives_left) in rec_events:
+                 if lives_left == 2: c_rec = 'orange'
+                 elif lives_left == 1: c_rec = 'yellow'
+                 else: c_rec = 'magenta'
+                 ax.scatter(rx, ry, c=c_rec, s=25, zorder=20, edgecolors='white', marker='X')
+
+            # 5. START POINT
+            if len(segment_to_plot) > 0:
+                sy, sx = segment_to_plot[0]
+                ax.scatter(sx, sy, c='yellow', s=100, zorder=20, label='Start')
+
+        # -------------------
+        # 1. GRAPH (NODES AND EDGES) only ax1
+            if graph_to_plot is not None:
+                for u, v in graph_to_plot.edges():
+                    if 'pos' in graph_to_plot.nodes[u] and 'pos' in graph_to_plot.nodes[v]:
+                        pos_u = graph_to_plot.nodes[u]['pos']
+                        pos_v = graph_to_plot.nodes[v]['pos']
+                        ax1.plot([pos_u[1], pos_v[1]], [pos_u[0], pos_v[0]], c='red', linewidth=1.5, alpha=0.7, zorder=15)
+
+                for node_id in graph_to_plot.nodes():
+                    if 'pos' in graph_to_plot.nodes[node_id]:
+                        pos = graph_to_plot.nodes[node_id]['pos']
+                        ax1.scatter(pos[1], pos[0], c='red', s=30, zorder=16, edgecolors='black')
+
+            
+
+        # -------------------
+        # LEFT (ax1)
+        # -------------------
         if len(segment_to_plot) > 0:
             sy, sx = zip(*segment_to_plot)
-            plt.plot(sx, sy, color=color_line, linewidth=2, alpha=0.9, label=label_txt)
-            plt.scatter(sx[0], sy[0], c='yellow', s=100, zorder=10, label='Start')
+            ax1.plot(sx, sy, color=color_line, linewidth=2, alpha=0.9, label=label_txt)
             
-            # La testa dell'agente la mostriamo solo se è vivo (non nel replay statico)
+            # Agent head
             if not use_ghost: 
-                plt.scatter(sx[-1], sy[-1], c='lime', s=80, zorder=11, edgecolors='black') 
+                ax1.scatter(sx[-1], sy[-1], c='lime', s=80, zorder=11, edgecolors='black') 
 
-        graph_to_plot = None
-        if use_ghost:
-            graph_to_plot = getattr(self, 'last_predicted_graph', None)
-        else:
-            graph_to_plot = getattr(self, 'predicted_graph', None)
-
-        if graph_to_plot is not None:
-
-            for u, v in graph_to_plot.edges():
-                if 'pos' in graph_to_plot.nodes[u] and 'pos' in graph_to_plot.nodes[v]:
-                    pos_u = graph_to_plot.nodes[u]['pos'] # (y,x format)
-                    pos_v = graph_to_plot.nodes[v]['pos'] # (y,x format)
-                    # we need to invert (y,x) to (x,y) for plotting
-                    plt.plot([pos_u[1], pos_v[1]], [pos_u[0], pos_v[0]], c='red', linewidth=1.5, alpha=0.7, zorder=15)
-
-            for node_id in graph_to_plot.nodes():
-                if 'pos' in graph_to_plot.nodes[node_id]:
-                    pos = graph_to_plot.nodes[node_id]['pos']
-                    plt.scatter(pos[1], pos[0], c='red', s=30, zorder=16, edgecolors='black')
-
-        if len(path_to_plot) > 0:
-            py, px = zip(*path_to_plot)
-            plt.plot(px, py, c='white', linestyle='--', alpha=0.5)
-            plt.scatter(px, py, c='white', s=25, alpha=0.6, zorder=8)
-
-        if tgt_to_plot is not None:
-            if not use_ghost:
-                plt.plot([self.current_pos[1], tgt_to_plot[1]], 
-                         [self.current_pos[0], tgt_to_plot[0]], c='red', ls=':', alpha=0.7)
-            #plt.scatter(tgt_to_plot[1], tgt_to_plot[0], c='deepskyblue', s=350, marker='*', zorder=12)
-            hit_box = plt.Circle((tgt_to_plot[1], tgt_to_plot[0]), 15.0, color='lime', fill=False, linewidth= 0.5,linestyle = "--", zorder=12)
-            plt.gca().add_patch(hit_box)
+        # -------------------
+        # RIGHT (ax2)
+        # -------------------
+        if len(traj_data) > 1:
+            # Swap coordinates y,x -> x,y for matplotlib
+            points = np.array([(p[1], p[0]) for p in traj_data]) 
             
-        plt.title(f"Status: {label_txt} | Steps: {final_steps}")  
-        plt.legend(loc='upper right')
-        plt.axis('off')
-        
+            # Create segments
+            segments = np.concatenate([points[:-1], points[1:]], axis=1).reshape(-1, 2, 2)
+            
+            # Colors based on is_reversing (which is the 3rd element in traj_data tuple)
+            is_rev_list = [p[2] for p in traj_data[1:]]
+            colors = [col_rev if rev else col_fwd for rev in is_rev_list]
+
+            # Fast drawing with LineCollection
+            lc = LineCollection(segments, colors=colors, linewidths=2, alpha=0.9)
+            ax2.add_collection(lc)
+            
+            # Agent head
+            if not use_ghost:
+                ex, ey = points[-1]
+                ax2.scatter(ex, ey, c='lime', s=80, zorder=11, edgecolors='black')
+
+
         if save_path:
             try: plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
             except: pass

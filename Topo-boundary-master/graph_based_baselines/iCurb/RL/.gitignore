@@ -16,3 +16,5 @@ dataset_stoccarda
 gnn_dataset_20_80
 runs
 inference_videos
+inference_pickle_graphs
+inference_pickle_graphs_Prova

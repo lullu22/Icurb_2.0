@@ -173,11 +173,11 @@ class dataset(Dataset):
         ################################################
 
         ######## dataset_PMM-NY ###########################
-        #with open('./dataset_PMM-NY/data_split.json','r') as jf:
+        with open('./dataset_PMM-NY/data_split.json','r') as jf:
         ###################################################
 
         ######## dataset_manhattan ###########################
-        with open('./dataset_manhattan/data_split.json','r') as jf:
+        #with open('./dataset_manhattan/data_split.json','r') as jf:
         ###################################################
 
             json_list = json.load(jf)
@@ -212,11 +212,11 @@ class valid_dataset(Dataset):
         ################################################
 
         ######## dataset_PMM-NY ###########################
-        #with open('./dataset_PMM-NY/data_split.json','r') as jf:
+        with open('./dataset_PMM-NY/data_split.json','r') as jf:
         ###################################################
 
         ######## dataset_manhattan ###########################
-        with open('./dataset_manhattan/data_split.json','r') as jf:
+        #with open('./dataset_manhattan/data_split.json','r') as jf:
         ###################################################
 
             json_list = json.load(jf) 
@@ -305,7 +305,7 @@ def train(args, epoch, net, dataloader, train_len, optimizer, criterion, writer,
             f1 = val(args, epoch, net, valid_dataloader, counter + train_len*epoch, valid_len, writer, valid_save_dir, criterion)
             if f1 > best_f1:
                 best_f1 = f1
-                print(f"🏆 Nuovo F1 score migliore: {f1:.4f}. Salvataggio checkpoint all'epoca {epoch}...")
+                print(f" Nuovo F1 score migliore: {f1:.4f}. Salvataggio checkpoint all'epoca {epoch}...")
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': net.state_dict(),
@@ -458,7 +458,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     ### change when we want try new experiment #######
-    new_name = "manhattan_efficentnet_b4_1.6_RL"
+    new_name = "PMM-NY_efficentnet_b4_1.6_RL"
     ##################################################
 
     # Selezione loss

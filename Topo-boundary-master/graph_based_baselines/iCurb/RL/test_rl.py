@@ -2,10 +2,14 @@ import gymnasium as gym
 import numpy as np
 import cv2
 import os
+import time 
 import torch
 import math
+import pickle
 import matplotlib.pyplot as plt
 import pandas as pd 
+import networkx as nx
+from graph_utils import extract_paths_data
 from scipy.spatial import cKDTree
 from stable_baselines3 import PPO
 from tqdm import tqdm
@@ -20,46 +24,82 @@ from graph_utils import extract_paths_data
 MODEL_PATH = "./checkpoints_rl/rl_drawer_final.zip" 
 
 # Output directories
-OUTPUT_DIR = "./inference_results"        
-OUTPUT_VIDEO_DIR = "./inference_videos" 
-OUTPUT_CSV =  "./inference_CSV"
+OUTPUT_DIR = "./inference_results_Prova"        
+OUTPUT_VIDEO_DIR = "./inference_videos_Prova" 
+OUTPUT_CSV =  "./inference_CSV_Prova"
+OUTPUT_GRAPH_DIR_PICKLE= "./inference_pickle_graphs_Prova"
+OUTPUT_GRAPH_DIR = "./inference_graphs_Prova"
+
 
 # data collection for metrics 
 all_metrics_data = []
 
 # TEST DATASET DIRECTORIES
-TEST_MASK_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/records/seg/RL"
+TEST_MASK_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/records/seg/RL_Prova"
 
-TEST_ENDPOINT_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/records/endpoint/RL"
+TEST_ENDPOINT_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/records/endpoint/RL_Prova"
 
-TEST_RGB_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/iCurb/dataset_manhattan/cropped_tiff"
+TEST_RGB_DIR = "/localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/dataset_prova/cropped_tiff"
 
 
 # ANIMATION GENERATION FILTER
 # ===========================
+VIDEO_ENABLE = True 
 TARGET_MAPS_LIST = ["002240_44","000235_21", "000227_01"]
 FPS = 30
 # ===========================
 
 
 #RECOVERY ACTION 
+# ===========================
 RECOVERY = True
+# ===========================
 
-def calculate_metrics(agent_traj, gt_pixels): 
+
+# SUBSET SELECTION 
+# ===========================
+TEST_START_IDX = 0   
+TEST_END_IDX = None  # Set to None to process all maps
+# ===========================
+
+
+
+def calculate_metrics(agent_traj, gt_pixels, tolerance = 5.0): 
 
     if len(agent_traj) < 2 or len(gt_pixels) < 2 : 
-        return 0.0, 0.0 
+        return 0.0, 0.0, 0.0 
     
     agent_arr = np.array(agent_traj)
     gt_arr = np.array(gt_pixels)
 
     if gt_arr.shape[1] == 2:
-        gt_arr = gt_arr[:, [1, 0]]
+        gt_arr = gt_arr[:, [1, 0]] # swap x,y -> y,x 
 
+    # for pixel error
+    #-----------------------
     tree = cKDTree(gt_arr)
     distances, _ = tree.query(agent_arr)
+    #-----------------------
 
-    return np.mean(distances), np.max(distances)
+    # for covered path 
+    #-----------------------
+    tree_covered = cKDTree(agent_arr)
+    distances_covered, _ = tree_covered.query(gt_arr)
+
+    covered_pixels = np.sum(distances_covered <= tolerance)
+    total_gt_pixels= len(gt_arr)
+
+    if total_gt_pixels == 0: 
+        return 0.0 
+
+    accuracy_cov = (covered_pixels / total_gt_pixels) * 100
+    #-----------------------
+
+    return np.mean(distances), np.max(distances) , accuracy_cov
+
+
+
+
     
 
 def run_inference():
@@ -77,6 +117,14 @@ def run_inference():
         files = os.listdir(env.endpoint_dir)
         env.file_list = [os.path.splitext(f)[0] for f in files if f.endswith(('.png', '.jpg'))]
         env.file_list.sort() # Ensure deterministic order
+
+        if TEST_END_IDX is not None: 
+            end = TEST_END_IDX
+        else: 
+            end = len(env.file_list)
+
+        env.file_list = env.file_list[TEST_START_IDX:end]
+
         print(f"--- FOUND {len(env.file_list)} MAPS IN TEST SET ---")
     else:
         print(f"CRITICAL ERROR: Test Endpoint directory not found: {env.endpoint_dir}")
@@ -95,13 +143,17 @@ def run_inference():
     os.makedirs(OUTPUT_DIR, exist_ok=True) # for images 
     os.makedirs(OUTPUT_VIDEO_DIR, exist_ok=True) # for videos 
     os.makedirs(OUTPUT_CSV, exist_ok=True) # for CSV
+    os.makedirs(OUTPUT_GRAPH_DIR_PICKLE, exist_ok=True) # for pickle
+    os.makedirs(OUTPUT_GRAPH_DIR, exist_ok=True) # for graphs
+
+
 
     # 4. MAIN LOOP: PROCESS EACH MAP
     for map_name in tqdm(env.file_list, desc="Processing Maps"):
         
         # --- DECIDE WHETHER TO MAKE A VIDEO ---
         # Generate video only if the map name is in the target list
-        MAKE_VIDEO = map_name in TARGET_MAPS_LIST
+        MAKE_VIDEO = map_name in TARGET_MAPS_LIST and VIDEO_ENABLE
         
         # --- A. Load Map Data Manually ---
         env.current_map_name = map_name
@@ -161,9 +213,6 @@ def run_inference():
                 
                 vis_real = real_resized
 
-     
-
-
 
         # --- B. Initialize Video Writer (ONLY IF NEEDED) ---
         out = None
@@ -185,15 +234,17 @@ def run_inference():
         # --- D. Visualization Config ---
         # BGR Colors for OpenCV
         PATH_COLOR = (255, 255, 0)    # Cyan (Agent Trajectory)
-        NODE_COLOR = (0, 0, 255)      # Red (Ideal Waypoints)
+        NODE_COLOR_PRIMARY = (0, 0, 255)    # Red (Ideal Waypoints)
+        NODE_COLOR_SECONDARY = (200, 255, 255) # Orange (Secondary Waypoints)
         EDGE_COLOR = (0,255,0)          # Lime
         TRAJ_NODE_COLOR = (255, 0, 0) # Blue (Step Markers)
         STEP_MARKER_DIST = 30         # Draw a blue dot every 30 pixels
         SAMPLED_NODE_COLOR = (0, 255, 255) # Yellow (Sampled nodes every 30px)
-        ORIGINAL_WP_COLOR = (0, 0, 255)    # Red (Original Waypoints/Intersections)
-
+        
            
-        # --- GT SECTION (SAMPLED GRAPH: NODES EVERY 30px) ---
+        # --- GT SECTION (SAMPLED GRAPH: NODES EVERY 25px) ---
+        STEP_SIZE = 25
+
         vis_gt_heatmap = vis_heatmap.copy()
         vis_gt_real = vis_real.copy()
         
@@ -215,9 +266,9 @@ def run_inference():
             if pixel_path_xy:
                 sampled_nodes.append(pixel_path_xy[0])
             
-            # Iterate through pixels and take one every 30 steps (approx 30px distance)
+            # Iterate through pixels and take one every 25 steps 
             # Note: since pixels are adjacent, the index corresponds roughly to distance
-            STEP_SIZE = 25
+            
             for i in range(STEP_SIZE, len(pixel_path_xy), STEP_SIZE):
                 sampled_nodes.append(pixel_path_xy[i])
             
@@ -245,17 +296,34 @@ def run_inference():
 
             # 4. OVERLAY ORIGINAL WAYPOINTS (Red - Large)
             # To show the "true" topological nodes
-            for wp in original_waypoints:
+            # 4. OVERLAY ORIGINAL WAYPOINTS (COLORED BY TYPE)
+            wp_types = p_data.get('waypoint_types', [])
+            
+            
+            if not wp_types:
+                wp_types = [0] * len(original_waypoints)
+
+            for i, wp in enumerate(original_waypoints):
                 center = (int(wp[1]), int(wp[0]))
-                cv2.circle(vis_gt_heatmap, center, 4, ORIGINAL_WP_COLOR, -1)
-                cv2.circle(vis_gt_real, center, 4, ORIGINAL_WP_COLOR, -1)
+                
+                if i < len(wp_types) and wp_types[i] == 1:
+                    color = NODE_COLOR_SECONDARY 
+                else:
+                    color = NODE_COLOR_PRIMARY   
+
+                cv2.circle(vis_gt_heatmap, center, 4, color, -1)
+                cv2.circle(vis_gt_real, center, 4, color, -1)
         # -----------------------------------------------------------
 
         # metrics initialization 
         img_errors = []
+        img_time_error = []
         img_successes = 0
         total_paths_in_img = 0
     
+        #copy of rgb image for visualization of graphs 
+        vis_graph_accumulated = vis_real.copy()
+
         # --- E. Simulation Loop ---
         for  path_idx ,path_data in enumerate(all_paths_data):
             raw_waypoints = path_data['waypoints']
@@ -285,10 +353,22 @@ def run_inference():
             
             # --- Draw Static Elements (Waypoints) ---
             # Draw immediately on both canvases so they appear fixed
-            for wp in raw_waypoints:
+            current_wp_types = path_data.get('waypoint_types', [])
+            
+            
+            if not current_wp_types:
+                current_wp_types = [0] * len(raw_waypoints)
+
+            for i, wp in enumerate(raw_waypoints):
                 center = (int(wp[1]), int(wp[0]))
-                cv2.circle(vis_heatmap, center, 4, NODE_COLOR, -1)
-                cv2.circle(vis_real, center, 4, NODE_COLOR, -1)
+                
+                if i < len(current_wp_types) and current_wp_types[i] == 1:
+                    color = NODE_COLOR_SECONDARY
+                else:
+                    color = NODE_COLOR_PRIMARY
+                
+                cv2.circle(vis_heatmap, center, 4, color, -1)
+                cv2.circle(vis_real, center, 4, color, -1)
             
             # Draw Start Point
             start_pt = (int(env.current_pos[1]), int(env.current_pos[0]))
@@ -300,7 +380,8 @@ def run_inference():
             last_safe_pos = env.current_pos.copy() 
             last_safe_heading = env.current_heading
             last_safe_step_count = 0
-            MAX_RETRIES = 3            
+            MAX_RETRIES = 3        
+            GLOBAL_MAX_RECOVERIES = 20     
             retries_left = MAX_RETRIES 
             total_recoveries = 0 
             consecutive_off_road = 0   
@@ -308,15 +389,45 @@ def run_inference():
 
             actions_tried_in_recovery = []
             #=======================
+        
+
+            trajectory = [] # here we save the trajectory of the agent
+
+            node_positions = [] # here we save the positions of the nodes added to the graph by the agent
 
 
-            trajectory = []
+            # BACKUP VISUALIZATION (for recovery drawing) 
+            #=======================
+            vis_heatmap_backup = vis_heatmap.copy()
+            vis_real_backup = vis_real.copy()
+            #=======================
+
+            # RECOVERY VARIABLES for trajectory drawing
+            #=======================
+            last_safe_traj_idx = 0
+            last_safe_node_count = 0 
+            last_safe_graph_id = 0
+            #=======================
+
+            # INITIALIZATION GRAPH
+            #=======================
+            G = nx.Graph()
+            node_id = 0 
+            #=======================
+
+            start_time = time.perf_counter()
 
             # 2. Run Agent Loop
             obs = env._get_observation()
             done = False
             
             prev_pos = (int(env.current_pos[1]), int(env.current_pos[0]))
+
+            ###
+            G.add_node(node_id,pos = prev_pos, type = "start")
+            last_node_id = node_id
+            ###
+
 
             trajectory.append(prev_pos)
 
@@ -330,7 +441,7 @@ def run_inference():
                     if recovery_steps_left == 10:
                         dominant_action, _ = model.predict(obs, deterministic=True)
                         
-                        obs_tensor, _ = model.policy.obs_to_tensor(obs)
+                        obs_tensor, _ = model.policy.obs_to_tensor(obs) 
 
                         with torch.no_grad():
                             # we take the distribution 
@@ -356,8 +467,7 @@ def run_inference():
 
                         current_banned = actions_tried_in_recovery + [int(dominant_action)]
                     
-                        print(f"  [RECOVERY MEMORY] retries_left: {retries_left} | "
-                          f"Banned: {list(set(current_banned))} -> Action: {action}")
+                        print(f"[RECOVERY MEMORY] retries_left: {retries_left} |" f"Banned: {list(set(current_banned))} -> Action: {action}")
                         
                         actions_tried_in_recovery.append(int(action))
                     
@@ -383,7 +493,7 @@ def run_inference():
                     
                     is_on_road = False
                     if 0 <= cur_y < h_img and 0 <= cur_x < w_img:
-                        if env.heatmap[cur_y, cur_x] > 0.15: # threshold
+                        if env.heatmap[cur_y, cur_x] > 0.25: # threshold
                             is_on_road = True
 
                     if is_on_road:
@@ -394,6 +504,11 @@ def run_inference():
 
                         actions_tried_in_recovery = []
                         retries_left = MAX_RETRIES
+
+                        #update trajectory index for drawing
+                        last_safe_traj_idx = len(trajectory)
+                        last_safe_node_count = len(node_positions)
+                        last_safe_graph_id = last_node_id
                         
                     else:
                         consecutive_off_road += 1 
@@ -401,13 +516,13 @@ def run_inference():
                     # B. Recovery
                     needs_rescue = (consecutive_off_road > 5) or (done and not env.last_run_success)
 
-                    if needs_rescue and retries_left > 0:
+                    if needs_rescue and retries_left > 0 and total_recoveries < GLOBAL_MAX_RECOVERIES:
 
                         # 1. go back in safe position
                         env.current_pos = last_safe_pos.copy()
                         env.current_heading = last_safe_heading
                         
-                        # 2. Reset variables ofEnvironment 
+                        # 2. Reset variables of Environment 
                         env.off_road_counter = 0 
                         env.steps_in_episode = last_safe_step_count
                         
@@ -419,22 +534,63 @@ def run_inference():
                         recovery_steps_left = 10 
                         retries_left -= 1
                         total_recoveries += 1 
+
+                        # cancel last part of trajectory for visualization
+                        trajectory = trajectory[:last_safe_traj_idx]
+
+                        # cancel last part of node positions for visualization
+                        node_positions = node_positions[:last_safe_node_count]
+
+                        # remove last nodes from the graph
+                        nodes_to_remove = [n for n in G.nodes() if isinstance(n, int) and n > last_safe_graph_id]
+
+                        node_id = last_safe_graph_id
+                        last_node_id = last_safe_graph_id
+
+                        # Remove nodes from the graph
+                        if nodes_to_remove:
+                            G.remove_nodes_from(nodes_to_remove)
+
+                        #restore backup visualization
+                        vis_heatmap = vis_heatmap_backup.copy()
+                        vis_real = vis_real_backup.copy()
+
+                        if len(trajectory) > 1: 
+                            pts = np.array(trajectory, np.int32)
+                            pts = pts.reshape((-1, 1, 2))
+                            cv2.polylines(vis_heatmap, [pts], isClosed=False, color=PATH_COLOR, thickness=2)
+                            cv2.polylines(vis_real, [pts], isClosed=False, color=PATH_COLOR, thickness=2)
+
+                        for node_pos in node_positions:
+                            cv2.circle(vis_heatmap, node_pos, 7, TRAJ_NODE_COLOR, -1) # Blue Dot
+                            cv2.circle(vis_real, node_pos, 7, TRAJ_NODE_COLOR, -1)
                         
-                        # 5. update observation 
+                        if len(trajectory) > 0:
+                            prev_pos = trajectory[-1]
+                        else:
+                            prev_pos = (int(last_safe_pos[1]), int(last_safe_pos[0]))
+
+                        dist_acc = 0.0 # reset distance accumulator because we are back in a safe position
+
+                        # 5. update observation
                         obs = env._get_observation()
                         
                         #visualization 
                         rec_pt = (int(last_safe_pos[1]), int(last_safe_pos[0]))
 
                         if retries_left == 2:   
-                            rec_color = (0, 165, 255)  #orange 
+                            rec_color = (0, 165, 255)  # orange 
                         elif retries_left == 1:  
-                            rec_color = (0, 255, 255)  #yellow
+                            rec_color = (0, 255, 255)  # yellow
                         else:                    
-                            rec_color = (255, 0, 255)  #purple
+                            rec_color = (255, 0, 255)  # magenta
 
                         cv2.circle(vis_heatmap, rec_pt, 5, rec_color, -1)
                         cv2.circle(vis_real, rec_pt, 5, rec_color, -1)
+
+                        # Backup visualization of recovery point
+                        cv2.circle(vis_heatmap_backup, rec_pt, 5, rec_color, -1)
+                        cv2.circle(vis_real_backup, rec_pt, 5, rec_color, -1)
 
 
                         prev_pos = (int(last_safe_pos[1]), int(last_safe_pos[0]))
@@ -457,6 +613,16 @@ def run_inference():
                 dist_acc += step_dist
                 
                 if dist_acc >= STEP_MARKER_DIST:
+
+                    node_id += 1 
+                    G.add_node( node_id, pos = curr_pos, type = "path_node")
+                    G.add_edge(last_node_id, node_id, weight = dist_acc)
+                    last_node_id = node_id
+
+                    # Save the position of the node
+                    node_positions.append(curr_pos)
+                    
+
                     cv2.circle(vis_heatmap, curr_pos, 7, TRAJ_NODE_COLOR, -1) # Blue Dot
                     cv2.circle(vis_real, curr_pos, 7, TRAJ_NODE_COLOR, -1)
                     dist_acc = 0
@@ -470,6 +636,68 @@ def run_inference():
 
                 if env.steps_in_episode > 1500: break
 
+            #### CLOSE GRAPH ######
+            if dist_acc > 0:
+                node_id += 1 
+                end_pos = curr_pos
+                G.add_node( node_id, pos = end_pos, type = "end")
+                G.add_edge(last_node_id, node_id, weight = dist_acc)
+            else: 
+                nx.set_node_attributes(G, {last_node_id: "end"}, name="type")
+
+            #######################
+
+            #### CREATION TIME ###
+            end_time = time.perf_counter()
+
+            execution_time = end_time - start_time  #total time for path 
+
+            steps_taken = len(trajectory)
+            ms_per_steps = (execution_time/steps_taken)*1000 if steps_taken > 0 else 0 # time for each step in the path 
+            
+
+        
+
+            # SAVE Graph ##########
+            graph_filename = f"graph_{map_name}_path_{path_idx}.pickle"
+            with open(os.path.join(OUTPUT_GRAPH_DIR_PICKLE, graph_filename), 'wb') as f: # 'wb' means write binary 
+                pickle.dump(G, f)
+            ######################
+
+            #VISUALIZATION OF GRAPH 
+            
+
+            EDGE_COLOR_GRAPH = (0, 165, 255)  # orange
+            NODE_COLOR_GRAPH = (255, 0, 0)    # blu
+            START_COLOR = (0, 255, 0)         # green
+            END_COLOR = (0, 0, 255)           # Red
+
+            # Edge
+            for u, v, data in G.edges(data=True):
+                pos_u = G.nodes[u]['pos']
+                pos_v = G.nodes[v]['pos']
+                pt1 = (int(pos_u[0]), int(pos_u[1]))
+                pt2 = (int(pos_v[0]), int(pos_v[1]))
+                cv2.line(vis_graph_accumulated, pt1, pt2, EDGE_COLOR_GRAPH, thickness=2)
+
+            # Nodes
+            for node_id, data in G.nodes(data=True):
+                pos = data['pos']
+                pt = (int(pos[0]), int(pos[1]))
+                    
+                color = NODE_COLOR_GRAPH
+                radius = 5
+                if data.get('type') == 'start':
+                    color = START_COLOR
+                    radius = 6
+                elif data.get('type') == 'end':
+                    color = END_COLOR
+                    radius = 6
+                    
+                cv2.circle(vis_graph_accumulated, pt, radius, color, -1)
+
+
+
             # Draw End Point (Success/Fail)
             col_end = (0, 255, 0) if env.last_run_success else (0, 0, 255)
             cv2.circle(vis_heatmap, curr_pos, 8, col_end, -1 if env.last_run_success else 2)
@@ -477,24 +705,58 @@ def run_inference():
 
             gt_pixels = path_data.get('pixels',[])
 
-            avg_err, max_err = calculate_metrics(trajectory, gt_pixels)
+            # dense sequence for the computation of the metrics 
+            dense_trajectory = []
+
+            if len(trajectory) > 1:
+                for i in range(len(trajectory) - 1): 
+                    p1 = trajectory[i] # current 
+                    p2 = trajectory[i+1] # next step 
+
+                    # number of point between p1 and p2 
+
+                    distance = max(abs(p2[0] - p1[0]), abs(p2[1] - p1[1]))
+                    
+
+                    if distance == 0: # if the agent remain stationary 
+                        continue  
+                    ys = np.linspace(p1[0], p2[0], distance + 1)
+                    xs = np.linspace(p1[1], p2[1], distance + 1) 
+
+                    for k in range(len(ys)-1): 
+                        dense_trajectory.append((int(ys[k]), int(xs[k])))
+
+                dense_trajectory.append(trajectory[-1])
+            
+            else: 
+                dense_trajectory = trajectory
+
+
+            # Calculate Metrics
+            avg_err, max_err, _ = calculate_metrics(trajectory, gt_pixels, tolerance=5.0)
+            accuracy_cov = calculate_metrics(dense_trajectory, gt_pixels, tolerance=5.0)[2]
+
 
             all_metrics_data.append({
                 "Image": map_name,
                 "Path_ID": path_idx,
                 "Success": 1 if env.last_run_success else 0,
                 "Steps": len(trajectory),
+                "Completion_Rate": round(accuracy_cov, 2),
                 "Avg_Error_Px": round(avg_err, 2),
                 "Max_Error_Px": round(max_err, 2),
-                "Recoveries_Used": total_recoveries
+                "Recoveries_Used": total_recoveries,
+                "Time_sec": round(execution_time, 4),
+                "Time_Per_step_ms": round(ms_per_steps, 2)
             })
 
             img_errors.append(avg_err)
+            img_time_error.append(execution_time)
             total_paths_in_img +=1 
             if env.last_run_success: 
                 img_successes +=1
 
-            print(f"-> Path {path_idx}: Success={env.last_run_success}, Err={avg_err:.2f}px, Recovery_used = {total_recoveries}")
+            print(f"-> Path {path_idx}: Success={env.last_run_success}, time = {execution_time:.2f}s, compl={accuracy_cov:.2f}%, Err={avg_err:.2f}px, Recovery_used = {total_recoveries}")
             
             # Final Pause in Video
             if MAKE_VIDEO and out is not None:
@@ -504,14 +766,24 @@ def run_inference():
         # Close video file if it was opened
         if out is not None: out.release()
 
+        # saving graph 
+        graph_img_filename = f"vis_graph_{map_name}_ALL_PATHS.png"
+        cv2.imwrite(os.path.join(OUTPUT_GRAPH_DIR, graph_img_filename), vis_graph_accumulated)
+
         if total_paths_in_img > 0:
             avg_img_error = np.mean(img_errors)
             success_rate = (img_successes / total_paths_in_img) * 100
+            avg_img_time_error = np.mean(img_time_error)
+            tot_time = np.sum(img_time_error)
+
+
             
             print(f"\n[REPORT] Image: {map_name}")
             print(f"  - Paths Processed: {total_paths_in_img}")
             print(f"  - Success Rate:    {success_rate:.1f}%")
             print(f"  - Avg Error:       {avg_img_error:.2f} px")
+            print(f"  - Avg Time:        {avg_img_time_error:.2f} s")
+            print(f"  - Total Time:      {tot_time:.2f} s")
             print("-" * 30)
 
         # --- F. SAVE FINAL STATIC IMAGE (ALWAYS) ---
@@ -558,13 +830,20 @@ def run_inference():
         total_paths = len(df_final)
         final_success_rate = (df_final["Success"].mean())*100
         final_avg_error = df_final["Avg_Error_Px"].mean()
+        final_completion = (df_final["Completion_Rate"].mean())
+        avg_time = df_final["Time_sec"].mean()
+        avg_time_step = df_final["Time_Per_step_ms"].mean()
+
 
         print("\n" + "="*40)
         print("          FINAL REPORT")
         print("="*40)
         print(f"Total path processed: {total_paths}")
         print(f"Total Success Rate:  {final_success_rate:.2f}%")
+        print(f"Total Completion Rate: {final_completion:.2f}%")
         print(f"Total Avg Error:     {final_avg_error:.2f} px")
+        print(f"Total Avg Time:      {avg_time:.2f} s")
+        print(f"Total Avg Time/step: {avg_time_step:.2f} ms")
         print("="*40 + "\n")
 
         df_final.to_csv(os.path.join(OUTPUT_CSV, "final_metrics.csv"), index=False)
@@ -574,9 +853,7 @@ def run_inference():
 
 
     print(f"\n--- INFERENCE COMPLETE ---")
-    print(f"Images saved in: {OUTPUT_DIR}")
-    print(f"Videos saved in: {OUTPUT_VIDEO_DIR}")
-    print(f"CSV saved in: {OUTPUT_CSV}")
+   
 
 if __name__ == "__main__":
     run_inference() 

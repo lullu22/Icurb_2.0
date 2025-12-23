@@ -14,12 +14,12 @@ from rl_model import CustomCnnExtractor
 #                           CONFIGURAZIONE RL
 # =================================================================
 
-LOG_DIR = "./logs/ppo_road_drawer_v1"
-CHECKPOINT_DIR = "./checkpoints_rl"
+LOG_DIR = "./logs/ppo_road_drawer_v1_reversed"
+CHECKPOINT_DIR = "./checkpoints_rl_reversed"
 TOTAL_TIMESTEPS = 10_000_000  
 EVAL_FREQ_EPISODES = 5  
 
-# Hyperparameters PPO (Standard)
+# Hyperparameters PPO (Standard) 
 PPO_PARAMS = {
     "n_steps": 8192,
     "batch_size": 512,
@@ -118,7 +118,7 @@ class RenderCallback(BaseCallback):
             # Stampa risultato subito dopo lo Start
             print(f"[VALID END]   Reward: {final_reward:.2f} | Steps: {steps_taken}")
             
-            ckpt_path = os.path.join(CHECKPOINT_DIR, "latest_model.zip")
+            ckpt_path = os.path.join(CHECKPOINT_DIR, "latest_model_reversed.zip")
             self.model.save(ckpt_path)
             self.episode_counter = 0
 
@@ -134,11 +134,11 @@ def main():
     # --- 1. CREAZIONE AMBIENTI ---
     device_name = "cuda" if torch.cuda.is_available() else "cpu"
     
-    train_env_instance = RoadDrawerEnv(split='train', device=device_name)
+    train_env_instance = RoadDrawerEnv(split='train', device=device_name, enable_reverse_learning= False)
     train_env = DummyVecEnv([lambda: train_env_instance]) 
     
     # L'ambiente di validazione pesca dallo split 'valid' (se esiste nel JSON)
-    eval_env_instance = RoadDrawerEnv(split='valid', device=device_name)
+    eval_env_instance = RoadDrawerEnv(split='valid', device=device_name, enable_reverse_learning= False)
     eval_env = DummyVecEnv([lambda: eval_env_instance]) 
 
     # --- 2. CONFIGURAZIONE ALGORITMO PPO ---
@@ -154,12 +154,12 @@ def main():
     
     # --- 3. CONFIGURAZIONE CALLBACK E TRAINING ---
     
-    os.makedirs(os.path.join(LOG_DIR, "renders"), exist_ok=True)
+    os.makedirs(os.path.join(LOG_DIR, "renders_reversed"), exist_ok=True)
     
     render_callback = RenderCallback(
         eval_env=eval_env,
         render_freq=EVAL_FREQ_EPISODES,
-        save_path=os.path.join(LOG_DIR, "renders")
+        save_path=os.path.join(LOG_DIR, "renders_reversed")
     )
     
     print(f"\nInizio addestramento Agente RL (PPO) su {device_name}...")
@@ -170,7 +170,7 @@ def main():
         callback=render_callback
     )
 
-    model.save(os.path.join(CHECKPOINT_DIR, "rl_drawer_final.zip"))
+    model.save(os.path.join(CHECKPOINT_DIR, "rl_drawer_final_reversed.zip"))
     print("\nAddestramento completato. Modello salvato.")
 
 
