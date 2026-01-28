@@ -93,7 +93,7 @@ class RoadDrawerEnv(gym.Env):
                 print(f"ERRORE JSON: {e}")
                 self.file_list = []
 
-        enable_overfit = False  #############################################################################################
+        enable_overfit = False  ##################################
 
         training_images = ["005250_04", "002247_02","000227_10","000250_13","002242_22"]
         validation_images = ["980200_40"]
@@ -184,7 +184,8 @@ class RoadDrawerEnv(gym.Env):
 
         self.trajectory = []
         
-
+    # Filter dataset to include only images with valid heatmaps and graphs
+    # --------------------------------------------------------
     def _filter_dataset(self): 
         print(f"--- pre_check dataset ({self.split.upper()}) for valid path ---")
         print(f"Initial dataset size: {len(self.file_list)} images")
@@ -196,7 +197,8 @@ class RoadDrawerEnv(gym.Env):
 
         for img_name in iteration:
             try:
-                
+                # Only check existence of files
+                # ------------------------------------------------
                 if USE_TOPOLOGICAL_PATHING:
                     # 1. Check Heatmap (PNG o JPG)
                     hpath = os.path.join(self.heatmap_dir, f"{img_name}.png")
@@ -215,8 +217,10 @@ class RoadDrawerEnv(gym.Env):
                     
                     valid_files.append(img_name)
                     continue 
+                # ------------------------------------------------
 
-                
+                # Standard Pathing, more complex checks, we verify possible paths
+                # ------------------------------------------------
                 else: 
                     heatmap_path = os.path.join(self.heatmap_dir, f"{img_name}.npy")
                     graph_path = os.path.join(self.gt_graph_dir, f"{img_name}.pickle")
@@ -236,6 +240,7 @@ class RoadDrawerEnv(gym.Env):
                         valid_files.append(img_name)
                     else:
                         discarded_count += 1
+                # ------------------------------------------------
             
             except Exception as e:
                 discarded_count += 1
@@ -247,15 +252,14 @@ class RoadDrawerEnv(gym.Env):
 
         print(f"Valid files found: {len(valid_files)} | Discarded: {discarded_count}", end='\r')
         return valid_files
-    
+    #--------------------------------------------------------
             
-
-
-
+    # Only for STANDARD PATHING
+    # --------------------------------------------------------
     def _find_all_valid_paths(self):
-        """
-        Trova TUTTI i percorsi validi sulla mappa corrente e li restituisce in una lista.
-        """
+
+        # Finds all valid paths in the current map.
+
         if self.gt_data is None or self.heatmap is None:
             return []
 
@@ -265,7 +269,7 @@ class RoadDrawerEnv(gym.Env):
         margin = 20
         search_radius = 5
 
-        # 1. Trova border indices
+        # 1. Find border indices
         border_indices = []
         for i, (y, x) in enumerate(gt_vertices):
             if (y < margin or y > H-margin or x < margin or x > W-margin):
@@ -279,31 +283,33 @@ class RoadDrawerEnv(gym.Env):
                     border_indices.append(i)
 
         possible_missions = []
-        
-        # 2. Dijkstra per trovare tutti i collegamenti
+      
+        # 2. Dijkstra for find paths
         for start_idx in border_indices:
             dist_matrix, predecessors = dijkstra(gt_adj, directed=False, indices=start_idx, return_predecessors=True)
             
             for end_idx in border_indices:
                 if end_idx == start_idx: continue
-                
-                # Validazione distanza
+
+                # distance validation
                 if dist_matrix[end_idx] == np.inf: continue
                 if np.linalg.norm(gt_vertices[end_idx] - gt_vertices[start_idx]) <= 300: continue
-                
-                # Ricostruzione percorso
+
+                # Path reconstruction
                 full_path = self._reconstruct_path(predecessors, start_idx, end_idx)
                 
-                # Aggiungi alla lista
+                # Add to list
                 possible_missions.append({
-                    'path_indices': full_path, # Indici dei nodi
+                    'path_indices': full_path, # Node indices
                     'start_coord': gt_vertices[start_idx],
                     'end_coord': gt_vertices[end_idx]
                 })
 
         return possible_missions
+    #--------------------------------------------------------
 
     def reset(self, seed=None, options=None):
+
         # 1. Snapshot Memory
         if hasattr(self, 'current_segment') and len(self.current_segment) > 1:
             self.last_finished_segment = list(self.current_segment)
@@ -317,7 +323,7 @@ class RoadDrawerEnv(gym.Env):
                 self.last_trajectory = []
 
             if hasattr(self,'predicted_graph') and self.predicted_graph is not None:
-                self.last_predicted_graph = self.predicted_graph
+                self.last_predicted_graph = self.predicted_graph 
             else:
                 self.last_predicted_graph = None
 
@@ -331,12 +337,13 @@ class RoadDrawerEnv(gym.Env):
         
         restor_old_mission = False
 
-        if self.mission_cache is not None: 
+        if self.mission_cache is not None:
+
             if (not self.last_run_success) and (self.consecutive_failures < self.max_failures): 
                 restor_old_mission = True 
                 self.consecutive_failures += 1
-            else : 
 
+            else : 
                 if len(self.session_history) > 0:
                     n = len(self.session_history)
                     
@@ -348,20 +355,22 @@ class RoadDrawerEnv(gym.Env):
                     avg_recs_tot = np.mean(all_recs)
                     
                     # trend analysis
-                    window = max(1, int(n * 0.1)) 
+                    window = max(1, int(n * 0.1)) # 10% of n attempts
                     
                     start_steps = np.mean(all_steps[:window])
                     end_steps = np.mean(all_steps[-window:])
                     
                     start_recs = np.mean(all_recs[:window])
                     end_recs = np.mean(all_recs[-window:])
-                    
-                    # Indicatori visivi
-                    trend_steps = "increase" if end_steps > start_steps else "decrese"
+
+                    # determine trends
+                    trend_steps = "increase" if end_steps > start_steps else "decrease"
                     trend_recs = "decrease" if end_recs < start_recs else "increase"
                     
                     result = "SUCCESS" if self.last_run_success else "FAIL"
 
+                # Report generation
+                # ============================================================
                     print(f"\n[MAP REPORT] Map: {self.current_map_name} | Result: {result}")
                     print(f" -> Attempts: {n}")
                     print(f" -> GLOBAL AVG: Steps={avg_steps_tot:.1f}, Recs={avg_recs_tot:.1f}")
@@ -384,23 +393,21 @@ class RoadDrawerEnv(gym.Env):
                 self._load_new_map_data()
             
             self.mission_path = list(data['path'])
-            self.current_pos = np.array(data['start_pos'])
-            self.current_heading = data['start_heading']
+            self.current_pos = np.array(data['start_pos']) # current poisition is the start pos
+            self.current_heading = data['start_heading'] # current heading is the start heading
 
-            # Recovery 
-
+            # Recovery
             # ==================================================
-            self.retries_left = self.max_retries
-            self.last_safe_pos = self.current_pos.copy()
-            self.last_safe_heading = self.current_heading
-
-            self.recovery_events = []
+            self.retries_left = self.max_retries # reset retries
+            self.last_safe_pos = self.current_pos.copy() # the last safe position is the start pos 
+            self.last_safe_heading = self.current_heading # the last safe heading is the start heading
+            self.recovery_events = [] # reset recovery events
             # ==================================================
 
-
-
-            self.current_wp_index = 1 if len(self.mission_path) > 1 else 0 
+            # Setup mission variables
+            self.current_wp_index = 1 if len(self.mission_path) > 1 else 0
             self.current_target = self.mission_path[self.current_wp_index]
+            
             cy, cx = int(self.current_pos[0]), int(self.current_pos[1])
             self.current_segment = [(cy, cx)] 
             self.drawn_nodes = set([(cy, cx)])
@@ -430,22 +437,22 @@ class RoadDrawerEnv(gym.Env):
         self._load_new_map_data()
         self.global_episode_count += 1
         
-        path_selected_idx = -1 
+        path_selected_idx = -1 # default invalid index
         
         if self.available_paths_cache:
-            # --- SELEZIONE NUOVO PATH ---
+            # --- SELECT NEW RANDOM PATH ---
             path_selected_idx = np.random.randint(len(self.available_paths_cache))
             mission_data = self.available_paths_cache[path_selected_idx]
 
             if USE_TOPOLOGICAL_PATHING:
                 raw_waypoints = mission_data['waypoints']
                 self.mission_path = [np.array(wp) for wp in raw_waypoints]
+
             else:
-            
                 path_indices = mission_data['path_indices']
                 gt_vertices = np.array(self.gt_data['vertices'])
             
-                # Campionamento
+                # Sample waypoints by distance 
                 sparse_indices = self._sample_path_by_distance(path_indices, gt_vertices, WAYPOINT_MIN_DIST)
                 self.mission_path = [gt_vertices[i] for i in sparse_indices]
 
@@ -456,36 +463,33 @@ class RoadDrawerEnv(gym.Env):
             self.current_wp_index = 1 
             self.current_target = self.mission_path[self.current_wp_index]
             
-            # --- QUESTA PRINT RIMANE: TI AVVISA SOLO AL CAMBIO ---
+            
             real_path_id = mission_data['global_id']
-
             if self.split == 'train':
                 print(f"[{self.split.upper()}] Ep: {self.global_episode_count} | Map: {self.current_map_name} | Path ID: {real_path_id}/{(self.original_total_paths)-1}")
-            
-            # Calcolo Angolo
+
+            # Compute Angle
             dy = self.current_target[0] - self.current_pos[0]
             dx = self.current_target[1] - self.current_pos[1]
             base_angle = math.atan2(dy, dx)
             
         else:
             # FALLBACK
-            print(f"[{self.split.upper()}] WARNING: Nessun percorso trovato! Usando Random Fallback.")
+            print(f"[{self.split.upper()}] WARNING: No path found!")
             self.current_pos = self._select_start_point_fallback()
             self.mission_path = [self.current_pos]
             self.current_target = self.current_pos
             self.current_wp_index = 0
-            base_angle = np.random.uniform(0, 6.28)
+            base_angle = np.random.uniform(0, 6.28) # 0 to 2pi
 
         # Init State
         self.current_heading = base_angle + np.random.uniform(-0.3, 0.3)
 
-
-        # Recovery 
+        # Recovery Logic
         # ==================================================
         self.retries_left = self.max_retries
         self.last_safe_pos = self.current_pos.copy()
         self.last_safe_heading = self.current_heading
-
         self.recovery_events = []
         # ==================================================
 
@@ -523,39 +527,38 @@ class RoadDrawerEnv(gym.Env):
 
     def step(self, action):
 
+        # 1. Save previous position
         pos_before_move = self.current_pos.copy()
 
-
-        # save distance from waypoint 
+        # 2. Save distance from waypoint
         prev_dist_wp = np.linalg.norm(pos_before_move - self.current_target)
 
-        # we compute the distance from the safe point before starting moving 
+        # 3. We compute the distance from the safe point before starting moving
         if self.last_safe_pos is not None:
             prev_dist_from_safety = np.linalg.norm(pos_before_move - self.last_safe_pos) 
         else: 
             prev_dist_from_safety = 0.0
 
-        
-
         done = False
         truncated = False
-        reward = self.steps_penalty  # small penalty for each step taken 0,01
+        reward = self.steps_penalty  # small penalty for each step taken 0,01 -> we try to incentivize faster completions
 
-        
         y, x = self.current_pos
         H, W = self.heatmap.shape
-       
 
-        current_step_length = SEGMENT_LENGTH 
-        current_angle_idx = 0
-        is_reversing = False
+        current_step_length = SEGMENT_LENGTH
+        current_angle_idx = 0 
+        is_reversing = False # flag to indicate if the agent is reversing
 
-        if self.enable_reverse_learning: 
+
+        # 1. Determine action
+        if self.enable_reverse_learning:  
 
             if action < self.n_angles: 
                 #forward 
                 current_angle_idx = action 
                 current_step_length = SEGMENT_LENGTH
+                is_reversing = False
 
             else: 
                 #backward
@@ -581,8 +584,7 @@ class RoadDrawerEnv(gym.Env):
         valid = (rr >= 0) & (rr < H) & (cc >= 0) & (cc < W)
         rr, cc = rr[valid], cc[valid]
 
-
-
+        # 3. Update visited pixels
         new_pixels_count = 0
         for r, c in zip(rr, cc):
             coord = (int(r), int(c))
@@ -590,10 +592,7 @@ class RoadDrawerEnv(gym.Env):
                 self.visited_pixels.add(coord)
                 new_pixels_count += 1
 
-
-
-        # Limit border 
-        #==================================================
+        # 4. Limit border checking
         if len(rr) == 0:
             
             if self.steps_in_episode < 5: 
@@ -605,15 +604,15 @@ class RoadDrawerEnv(gym.Env):
                 done = True
 
             return self._get_observation(), reward, done, truncated, {}
-        #==================================================
-
+        
+        # 5. Update current position
         new_y, new_x = rr[-1], cc[-1] #  position of last pixel of the line 
         self.current_pos = np.array([new_y, new_x])
         self.current_heading = new_heading
 
         self.trajectory.append((new_y, new_x, is_reversing))
-        
-        # update drawn segment and nodes 
+
+        # 6. Update drawn segment and nodes
         for r, c in zip(rr, cc):
             coord = (int(r), int(c))
             self.current_segment.append(coord)
@@ -621,8 +620,8 @@ class RoadDrawerEnv(gym.Env):
             
         self.steps_in_episode += 1
 
-        # GRAPH CONSTRUCTION 
-        # ==================================================
+        # GRAPH CONSTRUCTION (only in validation/test mode)
+        # ------------------------------------------------
         if self.predicted_graph is not None:
 
             last_node_pos = self.predicted_graph.nodes[self.last_node_id]['pos']
@@ -645,28 +644,32 @@ class RoadDrawerEnv(gym.Env):
                 self.predicted_graph.add_edge(self.last_node_id, new_id, weight=dist_from_last_node)
                 #update last node id
                 self.last_node_id = new_id
-        #===================================================
+        # ------------------------------------------------
 
-        
-        # REWARD AND RECOVERY 
-        # ==================================================
-        avg_intensity = np.mean(self.heatmap[rr, cc]) # average intensity of the line 
+        # REWARD AND RECOVERY
+        # ------------------------------------------
+
+        # compute average intensity along the line
+        avg_intensity = np.mean(self.heatmap[rr, cc]) 
+
+        # compute new distance to waypoint
         new_dist_wp = np.linalg.norm(self.current_pos - self.current_target)
 
+        # compute progress to target
         progress_to_target = prev_dist_wp- new_dist_wp
 
         if self.last_safe_pos is not None: 
             new_dist_from_safety = np.linalg.norm(self.current_pos - self.last_safe_pos)
             recovery_progress = prev_dist_from_safety - new_dist_from_safety
         else: 
-            recovery_progress = 0.0
+            recovery_progress = 0.0 
 
         # directional reward
         vec_to_wp = self.current_target - self.current_pos
         angle_to_wp = math.atan2(vec_to_wp[0], vec_to_wp[1])
         raw_angle_diff = angle_to_wp - self.current_heading
-        angle_diff = (raw_angle_diff + math.pi) % (2*math.pi) - math.pi 
-        directional_bonus = math.cos(angle_diff)
+        angle_diff = (raw_angle_diff + math.pi) % (2*math.pi) - math.pi # normalize to [-pi, pi]
+        directional_bonus = math.cos(angle_diff) # 1 if facing target, -1 if opposite 
 
         if avg_intensity < SAFE_THRESHOLD:
 
@@ -793,6 +796,9 @@ class RoadDrawerEnv(gym.Env):
             
         return self._get_observation(), reward, done, truncated, {}
 
+
+    #--- UTILITIES ---#
+    # only for STANDARD PATHING
     def _reconstruct_path(self, preds, start, end):
         path = []
         curr = end
@@ -814,7 +820,10 @@ class RoadDrawerEnv(gym.Env):
                 last = curr
         if indices[-1] != sampled[-1]: sampled.append(indices[-1])
         return sampled
+    #------------------#
 
+    ############ OBSERVATION ############
+    #------------------#
     def _get_observation(self):
         """
         Returns 2-channel observation.
@@ -825,11 +834,11 @@ class RoadDrawerEnv(gym.Env):
         cy, cx = int(round(self.current_pos[0])), int(round(self.current_pos[1]))
         H, W = self.heatmap.shape
         
-        # Inizializza i layer vuoti
+        # 2. Prepare Layers
         road_layer = np.zeros((CROP_SIZE, CROP_SIZE), dtype=np.float32)
         target_layer = np.zeros((CROP_SIZE, CROP_SIZE), dtype=np.float32)
 
-        # --- CANALE 0: ESTRAZIONE STRADA ---
+        # --- Channel 0: ROAD HEATMAP ---
         v_top = cy - (CROP_SIZE // 2)
         v_left = cx - (CROP_SIZE // 2)
         v_bottom = v_top + CROP_SIZE
@@ -846,10 +855,10 @@ class RoadDrawerEnv(gym.Env):
             dst_right = dst_left + patch.shape[1]
             road_layer[dst_top:dst_bottom, dst_left:dst_right] = patch
 
-        # --- CANALE 1: TARGET + BUSSOLA ---
+        # --- Channel 1: TARGET + COMPASS ---
         center = CROP_SIZE // 2
 
-        # A. Disegno il Target (Pallino/Box) - Intensità 1.0
+        # A. draw TARGET (intensity 1.0)
         if self.current_target is not None:
             dy = self.current_target[0] - self.current_pos[0]
             dx = self.current_target[1] - self.current_pos[1]
@@ -864,27 +873,34 @@ class RoadDrawerEnv(gym.Env):
             t_min_x = max(0, tx - 2); t_max_x = min(CROP_SIZE, tx + 3)
             target_layer[t_min_y:t_max_y, t_min_x:t_max_x] = 1.0
 
-        # B. DISEGNO BUSSOLA (Nuova aggiunta) - Intensità 0.5
-        # Disegniamo una linea che parte dal centro e punta nella direzione dell'agente
-        heading_len = CROP_SIZE // 4  # Lunghezza lancetta (es. 32 pixel)
-        
+        # B. draw COMPASS (New addition) - Intensity 0.5
+        # Draw a line from the center pointing in the direction of the agent
+        heading_len = CROP_SIZE // 4  # Length of the needle (e.g. 32 pixels)
+
         h_end_y = int(center + math.sin(self.current_heading) * heading_len)
         h_end_x = int(center + math.cos(self.current_heading) * heading_len)
-        
-        # Disegna linea
+
+        # Draw line
         start_point = (int(center), int(center))
         end_point = (h_end_x, h_end_y)
         
         cv2.line(target_layer, start_point, end_point, color=0.5, thickness=3)
 
-        # Stack finale
+        # Stack final observation
         final_obs = np.stack([road_layer, target_layer], axis=0)
-        return final_obs
 
+        return final_obs
+    #------------------#
+
+    ############ FALLBACK ############
+    #------------------#
     def _select_start_point_fallback(self):
-        if self.gt_data is None: return np.array([100, 100])
+        if self.gt_data is None: 
+            return np.array([100, 100])
+        
         v = self.gt_data['vertices']
         return np.array(v[np.random.choice(len(v))])
+    #------------------#
 
     def _load_new_map_data(self):
         if not self.file_list: 

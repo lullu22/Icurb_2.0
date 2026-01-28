@@ -1,1 +1,1 @@
-tensorboard --logdir /localhome/c-lcuffaro/Topo-boundary-master_def./Topo-boundary-master/graph_based_baselines/init_vertex/records/seg/PMM-NY_efficentnet_b4_1.6_RL_gaussian_20251212-082532 --port 5012 --bind_all
+tensorboard --logdir_spec NEW:records/seg/PMM-NY_efficentnet_b4_1.6_RL_new_encoder_gaussian_20260122-154357,ORIGINAL:records/seg/PMM-NY_efficentnet_b4_1.6_RL_gaussian_20251212-082532,REFINED:records/seg/PMM-NY_efficentnet_b4_1.6_RL_new_encoder_refined_heads_gaussian_20260127-083454 --port 5012 --bind_all

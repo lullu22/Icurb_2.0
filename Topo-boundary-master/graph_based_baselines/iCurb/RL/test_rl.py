@@ -1,3 +1,7 @@
+# Inference script for trained RL agent in RoadDrawerEnv.
+# Work only in case where topological analysis is used for path extraction
+
+#==================== IMPORTS ====================
 import gymnasium as gym
 import numpy as np
 import cv2
@@ -14,7 +18,7 @@ from scipy.spatial import cKDTree
 from stable_baselines3 import PPO
 from tqdm import tqdm
 
-# --- CUSTOM IMPORTS ---
+# ==== CUSTOM IMPORTS ====
 from road_drawer_env import RoadDrawerEnv
 from graph_utils import extract_paths_data
 
@@ -63,7 +67,7 @@ TEST_END_IDX = None  # Set to None to process all maps
 # ===========================
 
 
-
+# compute metrics between agent trajectory and gt pixels 
 def calculate_metrics(agent_traj, gt_pixels, tolerance = 5.0): 
 
     if len(agent_traj) < 2 or len(gt_pixels) < 2 : 
@@ -96,11 +100,6 @@ def calculate_metrics(agent_traj, gt_pixels, tolerance = 5.0):
     #-----------------------
 
     return np.mean(distances), np.max(distances) , accuracy_cov
-
-
-
-
-    
 
 def run_inference():
     print("--- STARTING INFERENCE ---")
@@ -152,16 +151,16 @@ def run_inference():
     for map_name in tqdm(env.file_list, desc="Processing Maps"):
         
         # --- DECIDE WHETHER TO MAKE A VIDEO ---
-        # Generate video only if the map name is in the target list
+        # Generate video only if the map name is in the target list and video generation is enabled
         MAKE_VIDEO = map_name in TARGET_MAPS_LIST and VIDEO_ENABLE
-        
-        # --- A. Load Map Data Manually ---
+
+        # --- A. Load Map Data ---
         env.current_map_name = map_name
         
         # Load Heatmap (Mask)
         hpath = os.path.join(env.heatmap_dir, f"{map_name}.png")
         if not os.path.exists(hpath):
-            hpath = hpath.replace('.png', '.jpg')
+            hpath = hpath.replace('.png', '.jpg') # try jpg
         if not os.path.exists(hpath): 
             continue # Skip if missing
         
@@ -171,11 +170,12 @@ def run_inference():
         # Load Endpoint
         epath = os.path.join(env.endpoint_dir, f"{map_name}.png")
         if not os.path.exists(epath):
-            epath = epath.replace('.png', '.jpg')
+            epath = epath.replace('.png', '.jpg') # try jpg
         if not os.path.exists(epath): 
             continue # Skip if missing
         
         endpoint_img = cv2.imread(epath, cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
+
 
         # Load Real RGB/TIFF Image
         tpath = os.path.join(TEST_RGB_DIR, f"{map_name}.tiff")
@@ -186,7 +186,7 @@ def run_inference():
         vis_heatmap = (heatmap_img * 255).astype(np.uint8)
         vis_heatmap = cv2.cvtColor(vis_heatmap, cv2.COLOR_GRAY2BGR)
         
-        # Real Image Canvas (Default to heatmap copy if real img is missing) 
+        # Real Image (Default to heatmap copy if real img is missing) 
         vis_real = vis_heatmap.copy()
 
         if os.path.exists(tpath):
@@ -200,18 +200,21 @@ def run_inference():
                 else:
                     real_rgb = real_raw
                 
-                # RESIZE to match Heatmap dimensions (Required for coordinate alignment), is not necessary 
+                
+                #- control shape and type -
+                # RESIZE to match Heatmap dimensions (Required for coordinate alignment), is not necessary, is already the same size
                 h, w = heatmap_img.shape
                 real_resized = cv2.resize(real_rgb, (w, h))
                 
-                # Normalize if 16-bit, ensure uint8
+                # NORMALIZE if 16-bit, ensure uint8
                 if real_resized.dtype != np.uint8:
                     if real_resized.max() > 255:
                         real_resized = (real_resized / 256).astype(np.uint8)
                     else:
                         real_resized = real_resized.astype(np.uint8)
                 
-                vis_real = real_resized
+                vis_real = real_resized 
+                # ------------------------------------
 
 
         # --- B. Initialize Video Writer (ONLY IF NEEDED) ---
@@ -234,12 +237,12 @@ def run_inference():
         # --- D. Visualization Config ---
         # BGR Colors for OpenCV
         PATH_COLOR = (255, 255, 0)    # Cyan (Agent Trajectory)
-        NODE_COLOR_PRIMARY = (0, 0, 255)    # Red (Ideal Waypoints)
+        NODE_COLOR_PRIMARY = (0, 0, 255)    # Red (Primary Waypoints)
         NODE_COLOR_SECONDARY = (200, 255, 255) # Orange (Secondary Waypoints)
-        EDGE_COLOR = (0,255,0)          # Lime
+        EDGE_COLOR = (0,255,0)          # Lime (Edges between nodes)
         TRAJ_NODE_COLOR = (255, 0, 0) # Blue (Step Markers)
         STEP_MARKER_DIST = 30         # Draw a blue dot every 30 pixels
-        SAMPLED_NODE_COLOR = (0, 255, 255) # Yellow (Sampled nodes every 30px)
+        SAMPLED_NODE_COLOR = (0, 255, 255) # Yellow (Sampled nodes every 25px)
         
            
         # --- GT SECTION (SAMPLED GRAPH: NODES EVERY 25px) ---
@@ -253,7 +256,8 @@ def run_inference():
             original_waypoints = p_data.get('waypoints', [])
             gt_pixels = p_data.get('pixels', []) 
 
-            if len(gt_pixels) < 2: continue
+            if len(gt_pixels) < 2: 
+                continue
 
             # 1. CREATE SAMPLED GRAPH FROM REAL PIXELS
             # Convert pixels to (x, y) format for calculations and drawing
@@ -267,9 +271,9 @@ def run_inference():
                 sampled_nodes.append(pixel_path_xy[0])
             
             # Iterate through pixels and take one every 25 steps 
-            # Note: since pixels are adjacent, the index corresponds roughly to distance
+            # Note: since pixels are adjacent, the index corresponds roughly to distance, we assume 1 pixel = 1 unit distance
             
-            for i in range(STEP_SIZE, len(pixel_path_xy), STEP_SIZE):
+            for i in range(STEP_SIZE, len(pixel_path_xy), STEP_SIZE): # range(start, end, step)
                 sampled_nodes.append(pixel_path_xy[i])
             
             # Always add the last point (End) if it's not too close to the previous one
@@ -299,15 +303,15 @@ def run_inference():
             # 4. OVERLAY ORIGINAL WAYPOINTS (COLORED BY TYPE)
             wp_types = p_data.get('waypoint_types', [])
             
-            
+            # Default to all primary if types missing
             if not wp_types:
                 wp_types = [0] * len(original_waypoints)
 
-            for i, wp in enumerate(original_waypoints):
+            for i, wp in enumerate(original_waypoints): # (index , waypoint) i -> 0,1,2... and wp -> [y,x]
                 center = (int(wp[1]), int(wp[0]))
-                
-                if i < len(wp_types) and wp_types[i] == 1:
-                    color = NODE_COLOR_SECONDARY 
+
+                if wp_types[i] == 1:
+                    color = NODE_COLOR_SECONDARY
                 else:
                     color = NODE_COLOR_PRIMARY   
 
@@ -352,10 +356,10 @@ def run_inference():
             env.off_road_counter = 0
             
             # --- Draw Static Elements (Waypoints) ---
-            # Draw immediately on both canvases so they appear fixed
+            # Draw immediately on both images so they appear fixed
             current_wp_types = path_data.get('waypoint_types', [])
-            
-            
+
+            # Default to all primary if types missing
             if not current_wp_types:
                 current_wp_types = [0] * len(raw_waypoints)
 
@@ -392,7 +396,6 @@ def run_inference():
         
 
             trajectory = [] # here we save the trajectory of the agent
-
             node_positions = [] # here we save the positions of the nodes added to the graph by the agent
 
 
@@ -415,6 +418,7 @@ def run_inference():
             node_id = 0 
             #=======================
 
+            # START TIME MEASUREMENT
             start_time = time.perf_counter()
 
             # 2. Run Agent Loop
@@ -423,11 +427,10 @@ def run_inference():
             
             prev_pos = (int(env.current_pos[1]), int(env.current_pos[0]))
 
-            ###
+            
             G.add_node(node_id,pos = prev_pos, type = "start")
             last_node_id = node_id
-            ###
-
+            
 
             trajectory.append(prev_pos)
 
@@ -438,7 +441,7 @@ def run_inference():
                 if recovery_steps_left > 0 and RECOVERY: 
 
 
-                    if recovery_steps_left == 10:
+                    if recovery_steps_left == 5:
                         dominant_action, _ = model.predict(obs, deterministic=True)
                         
                         obs_tensor, _ = model.policy.obs_to_tensor(obs) 
@@ -505,6 +508,8 @@ def run_inference():
                         actions_tried_in_recovery = []
                         retries_left = MAX_RETRIES
 
+                        recovery_steps_left = 0
+
                         #update trajectory index for drawing
                         last_safe_traj_idx = len(trajectory)
                         last_safe_node_count = len(node_positions)
@@ -531,7 +536,7 @@ def run_inference():
                         done = False 
                         
                         # 4.Random mode 
-                        recovery_steps_left = 10 
+                        recovery_steps_left = 5 
                         retries_left -= 1
                         total_recoveries += 1 
 
@@ -555,7 +560,9 @@ def run_inference():
                         vis_heatmap = vis_heatmap_backup.copy()
                         vis_real = vis_real_backup.copy()
 
-                        if len(trajectory) > 1: 
+                        # redraw the trajectory and node positions up to the last safe point
+                        # we use polylines for better performance
+                        if len(trajectory) > 1:
                             pts = np.array(trajectory, np.int32)
                             pts = pts.reshape((-1, 1, 2))
                             cv2.polylines(vis_heatmap, [pts], isClosed=False, color=PATH_COLOR, thickness=2)
@@ -574,8 +581,8 @@ def run_inference():
 
                         # 5. update observation
                         obs = env._get_observation()
-                        
-                        #visualization 
+
+                        #visualization of recovery point
                         rec_pt = (int(last_safe_pos[1]), int(last_safe_pos[0]))
 
                         if retries_left == 2:   
@@ -594,7 +601,6 @@ def run_inference():
 
 
                         prev_pos = (int(last_safe_pos[1]), int(last_safe_pos[0]))
-
 
                     #=======================================#
                     
@@ -647,7 +653,7 @@ def run_inference():
 
             #######################
 
-            #### CREATION TIME ###
+            #### END CREATION TIME ###
             end_time = time.perf_counter()
 
             execution_time = end_time - start_time  #total time for path 
@@ -664,9 +670,7 @@ def run_inference():
                 pickle.dump(G, f)
             ######################
 
-            #VISUALIZATION OF GRAPH 
-            
-
+            #VISUALIZATION OF GRAPH ON THE RGB IMAGE
             EDGE_COLOR_GRAPH = (0, 165, 255)  # orange
             NODE_COLOR_GRAPH = (255, 0, 0)    # blu
             START_COLOR = (0, 255, 0)         # green

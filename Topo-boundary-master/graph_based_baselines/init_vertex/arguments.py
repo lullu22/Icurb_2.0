@@ -23,15 +23,15 @@ def get_parser():
     ############################################################
 
     ######## dataset_PMM-NY #######################################
-    #with open('./dataset_PMM-NY/config_dir.yml', 'r') as f:
-    #   conf = yaml.safe_load(f.read())    # load the config file
-    #process(**conf)
+    with open('./dataset_PMM-NY/config_dir.yml', 'r') as f:
+       conf = yaml.safe_load(f.read())    # load the config file
+    process(**conf)
     ############################################################
 
     ######## dataset_prova#######################################
-    with open('./dataset_prova/config_dir.yml', 'r') as f:
-       conf = yaml.safe_load(f.read())    # load the config file
-    process(**conf)
+    #with open('./dataset_prova/config_dir.yml', 'r') as f:
+    #   conf = yaml.safe_load(f.read())    # load the config file
+    #process(**conf)
     ############################################################
 
     ######## dataset_stoccarda #######################################

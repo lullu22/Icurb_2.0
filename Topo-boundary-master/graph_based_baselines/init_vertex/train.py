@@ -35,9 +35,14 @@ class GaussianDistanceLoss(nn.Module):
 
     def forward(self, inputs, targets, already_gaussian=False):
         """
-        inputs  : predizione raw logit [B,1,H,W]
+        inputs  : prediction raw logit [B,1,H,W]
         targets : ground truth [B,1,H,W]
-        already_gaussian : True se il GT è già in forma gaussiana (es. endpoint)
+        already_gaussian : True if the GT is already a Gaussian heatmap
+        1. If GT is binary, compute distance transform and convert to Gaussian heatmap
+        2. Apply sigmoid to inputs
+        3. Compute MSE loss between predicted heatmap and GT heatmap
+        4. Return loss
+        5. If already_gaussian is True, skip step 1
         """
         B, _, H, W = targets.shape
         device = targets.device
@@ -112,7 +117,7 @@ class FocalGaussianLoss(nn.Module):
         B, _, H, W = targets.shape
         device = targets.device
 
-        # --- Genera Gaussian heatmap ---
+        # --- Gaussian heatmap ---
         if already_gaussian:
             heatmaps = targets
         else:
@@ -128,7 +133,7 @@ class FocalGaussianLoss(nn.Module):
                 heatmaps.append(torch.from_numpy(heatmap).to(device))
             heatmaps = torch.stack(heatmaps).unsqueeze(1).float()
 
-        # --- predizione sigmoid ---
+        # --- prediction sigmoid ---
         pred = torch.sigmoid(inputs)
 
         # --- MSE ---
@@ -139,14 +144,14 @@ class FocalGaussianLoss(nn.Module):
         alpha_t = torch.where(targets == 1, self.alpha, 1 - self.alpha)
         focal_factor = alpha_t * (1 - pt) ** self.gamma
 
-        # Normalizzazione per evitare NaN o scala minuscola
+        # Normalization to avoid NaN and stabilize training
         focal_factor = focal_factor / (focal_factor.mean() + 1e-2)
 
-        # --- Loss combinata ---
+        # --- Combined loss ---
         loss = focal_factor * mse
 
         if self.reduction == "mean":
-            return self.scale * loss.mean()  # scaling finale
+            return self.scale * loss.mean()  # final scaling
         elif self.reduction == "sum":
             return self.scale * loss.sum()
         else:
@@ -240,7 +245,7 @@ def collate_fn(batch):
     batch = list(filter(lambda x: x is not None, batch))
     return torch.utils.data.dataloader.default_collate(batch)
 
-######################### Funzione per salvare tensori come immagini ########################
+######################### function to save Tensor as images ########################
 def save_tensor_image(tensor, filename):
     img = tensor.detach().cpu().numpy()
     img = np.squeeze(img)
@@ -257,9 +262,9 @@ def save_tensor_image(tensor, filename):
         elif img.ndim == 3:
             Image.fromarray(img).convert('RGB').save(filename)
         else:
-            print(f"Formato immagine non supportato: {img.shape}")
+            print(f"Unsupported image format: {img.shape}")
     except Exception as e:
-        print(f"Errore nel salvataggio immagine {filename}: {e}")
+        print(f"Error saving image {filename}: {e}")
 
 ################################# Train ###################################
 def train(args, epoch, net, dataloader, train_len, optimizer, criterion, writer, valid_dataloader, valid_len, save_dir, checkpoint_path, valid_save_dir, initial_best_f1=0.0):
@@ -363,7 +368,7 @@ def val(args, epoch, net, dataloader, ii, val_len, writer, valid_save_dir, crite
 
     net.eval()
     f1_ave = 0
-    valid_count = 0  # conta solo immagini con GT valido
+    valid_count = 0  # only count images with valid F1
 
     for idx, data in enumerate(dataloader):
         img, mask, endpoint, name = data
@@ -377,10 +382,10 @@ def val(args, epoch, net, dataloader, ii, val_len, writer, valid_save_dir, crite
             pred_mask_sig = torch.sigmoid(pred_mask[0,0,:,:]).cpu().numpy()
             pred_endpoint_sig = torch.sigmoid(pred_endpoint[0,0,:,:]).cpu().numpy()
 
-            # Normalizza asse x da 0 a 100
-            x_norm = idx / (val_len - 1) * 100  # in questo caso i valori vanno da 0 a 100
-
-            # 🔹 Loss combinata mask + endpoint
+            # Normalized x for TensorBoard
+            x_norm = idx / (val_len - 1) * 100  # in this case the values go from 0 to 100
+            
+            #  Combined loss mask + endpoint
             if args.loss_type == 'bce':
                 loss_val = criterion['bce'](pred_mask, mask_tensor) + criterion['bce'](pred_endpoint, endpoint_tensor)
                 writer.add_scalar(f"val/bce_loss/epoch_{epoch}", loss_val.item(), x_norm)
@@ -394,7 +399,7 @@ def val(args, epoch, net, dataloader, ii, val_len, writer, valid_save_dir, crite
                 loss_val = criterion['focal_gaussian'](pred_mask, mask_tensor, already_gaussian=False) + criterion['focal_gaussian'](pred_endpoint, endpoint_tensor, already_gaussian=True)
                 writer.add_scalar(f"val/focal_gaussian_loss/epoch_{epoch}", loss_val.item(), x_norm)
 
-            # 🔹 Salvataggio predizioni
+            # Save predictions
             Image.fromarray((pred_mask_sig / np.max(pred_mask_sig) * 255).astype('uint8')).convert('RGB').save(
                 os.path.join(valid_save_dir, f'{name[0]}_mask.png')
             )
@@ -408,8 +413,8 @@ def val(args, epoch, net, dataloader, ii, val_len, writer, valid_save_dir, crite
             ######
             import matplotlib.pyplot as plt
 
-            # Salvataggio figura su TensorBoard
-            if idx in (100, 200, 300, 400) :  # salva solo per alcuni indici
+            # Save figure to TensorBoard
+            if idx in (100, 200, 300, 400) :  # save only for specific indices
                 
                 
                 fig, axes = plt.subplots(1, 4, figsize=(12, 4))
@@ -435,7 +440,7 @@ def val(args, epoch, net, dataloader, ii, val_len, writer, valid_save_dir, crite
             ######     
 
 
-            # Metriche
+            # Compute metrics
             acc, rec, f1 = eval_metric((pred_mask_sig > 0.2).astype(np.uint8), (mask_np > 0.2).astype(np.uint8))
             if f1 is not None:
                 f1_ave = (f1_ave * valid_count + f1) / (valid_count + 1) 
@@ -458,7 +463,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     ### change when we want try new experiment #######
-    new_name = "PMM-NY_efficentnet_b4_1.6_RL"
+    new_name = "PMM-NY_efficentnet_b4_1.6_RL_new_encoder_refined_heads"
     ##################################################
 
     # Selezione loss
@@ -472,7 +477,7 @@ if __name__ == '__main__':
         criterion = {'bce': nn.BCEWithLogitsLoss()}
     
 
-    # Writer con run separato e timestamp
+    # Writer for TensorBoard
     log_dir_base = "./records/seg"
     os.makedirs(log_dir_base, exist_ok=True)
     run_name = f"{new_name}_{args.loss_type}_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -495,7 +500,7 @@ if __name__ == '__main__':
     train_len = len(train_loader)
     valid_len = len(valid_loader)
 
-    # Modello e ottimizzatore
+    # Model and Optimizer
     #net = FPN()
     #net = FPN(backbone_name='resnet101')
     net = FPN(backbone_name='efficientnet_b4')
@@ -503,12 +508,7 @@ if __name__ == '__main__':
     net.to(device)
     optimizer = optim.Adam(net.parameters(), lr=1e-3)
 
-
-
-
-
     ##### checkpoint #################################
-
 
     start_epoch = 0
     best_f1 = 0.0
@@ -517,25 +517,25 @@ if __name__ == '__main__':
    
 
     if os.path.exists(checkpoint_path):
-        print(f"✅ Checkpoint trovato! Caricamento da: {checkpoint_path}")
-        # Carichiamo il checkpoint sulla CPU per evitare problemi di memoria
+        print(f"Found checkpoint: {checkpoint_path}")
+        # Load checkpoint onto CPU to avoid memory issues
         checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
         
-        # Controlliamo se è il nuovo formato (dizionario) o il vecchio
+        # Distinguish between new and old format of checkpoint
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            # Nuovo formato
+            # new format (complete checkpoint)
             net.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
-            best_f1 = checkpoint.get('best_f1', 0.0) # .get() per retrocompatibilità
-            print(f"Checkpoint completo caricato. Si riparte dall'epoca {start_epoch}.")
+            best_f1 = checkpoint.get('best_f1', 0.0) # .get() for backward compatibility
+            print(f"complete checkpoint uploaded: start from epoch: {start_epoch}.")
         else:
-            # Vecchio formato (solo pesi)
+            # old format (only weights)
             net.load_state_dict(checkpoint)
-            start_epoch = 0 # Ripartiamo a contare le epoche, ma con i pesi già addestrati
-            print("Checkpoint legacy (solo pesi) caricato. L'addestramento riprende con pesi pre-addestrati.")
+            start_epoch = 0 # restart from epoch 0 but with pre-trained weights
+            print("old checkpoint weights uploaded: start from epoch 0.")
     else:
-        print("Nessun checkpoint trovato. Inizio dell'addestramento da zero.")
+        print("No checkpoint found. Starting training from scratch.")
 
 
     #################################################

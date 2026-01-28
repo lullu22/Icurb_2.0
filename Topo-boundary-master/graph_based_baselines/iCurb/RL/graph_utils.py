@@ -177,9 +177,9 @@ def process_single_component(G, nodes_to_visit, image_shape):
         u = ordered_wps[i]
         v = ordered_wps[i+1]
         try:
-            path = nx.shortest_path(G, u, v, weight='weight')
+            path = nx.shortest_path(G, u, v, weight='weight') # In this case we use Dijkstra
             # Avoid duplicating junction points
-            full_path_indices.extend(path if len(full_path_indices) == 0 else path[1:])
+            full_path_indices.extend(path if len(full_path_indices) == 0 else path[1:]) # we take the full path for the first segment, then skip first node 
         except nx.NetworkXNoPath: 
             continue
 
@@ -189,6 +189,7 @@ def process_single_component(G, nodes_to_visit, image_shape):
         end_node = ordered_wps[-1]
         
         # If start and end are NOT on borders, it's likely a closed loop (e.g., internal roundabout)
+        # check if start and end node are not on borders 
         if not (is_on_border(start_node, image_shape, BORDER_MARGIN) or 
                 is_on_border(end_node, image_shape, BORDER_MARGIN)):
             try:
@@ -196,7 +197,7 @@ def process_single_component(G, nodes_to_visit, image_shape):
                 path_set = set(path_back)
                 node_set = set(ordered_wps)
                 
-                # Only close if the return path doesn't cross other visited waypoints
+                # Only close if the return path doesn't cross other visited waypoints but only start/end nodes
                 if len(path_set.intersection(node_set)) <= 2:
                     full_path_indices.extend(path_back[1:])
                     ordered_wps.append(start_node) # Adds start node to the end to close the loop
@@ -207,6 +208,7 @@ def process_single_component(G, nodes_to_visit, image_shape):
     return full_path_indices, ordered_wps
 
 def extract_paths_data(heatmap, endpoints_map):
+    
     """
     MAIN FUNCTION FOR RL.
     Input:
@@ -218,6 +220,7 @@ def extract_paths_data(heatmap, endpoints_map):
                  - 'waypoints': list of (row, col) tuples for KEY TARGETS
                  - 'waypoint_types': list of integers (0=primary, 1=secondary)
     """
+
     H, W = heatmap.shape
     
     # 1. Binarization and Skeletonization
@@ -235,16 +238,16 @@ def extract_paths_data(heatmap, endpoints_map):
     # Build KD-Tree 
     tree = cKDTree(skeleton_nodes)
 
-    # 2. Find target nodes (Endpoint map )
+    # 2. Find target nodes (Endpoint map)
     primary_nodes = peak_local_max(endpoints_map, min_distance=3, threshold_abs=0.1, exclude_border=False)
 
     snapped_primary_nodes = []
     if len(primary_nodes) > 0:
         # Snap to nearest skeleton pixel within 25 pixels
-        _, indices = tree.query(primary_nodes, distance_upper_bound=25.0)
+        _, indices = tree.query(primary_nodes, distance_upper_bound=25.0) # if we don't find anything within 25 pixels, we set index = len(skeleton_nodes)
         
         for idx in indices:
-            if idx < len(skeleton_nodes): # If valid neighbor found
+            if idx < len(skeleton_nodes): # If valid neighbor found (only value < len(skeleton_nodes) is valid)
                 snapped_primary_nodes.append(tuple(skeleton_nodes[idx]))
 
 
@@ -273,7 +276,7 @@ def extract_paths_data(heatmap, endpoints_map):
         primary_tree = cKDTree(list(unique_primary_nodes))
 
         for second_node in unique_secondary_nodes:
-            dist, _ = primary_tree.query(second_node)
+            dist, _ = primary_tree.query(second_node) # check distance of secondary to nearest primary
             if dist >= DISTANCE_THRESHOLD_PS:
                 final_nodes_map[second_node] = 'secondary'
     
@@ -306,12 +309,11 @@ def extract_paths_data(heatmap, endpoints_map):
             # Get waypoint types for potential further use
             wp_types = [] 
             for wp in waypoints:
-                # Recuperiamo il tipo dalla mappa creata prima
-                # Usiamo .get() per sicurezza, default 'secondary'
+                # recover type from final map
+                # default to 'secondary' if not found (should not happen)
                 raw_type = final_nodes_map.get(wp, 'secondary') 
                 
-                # Convertiamo in numeri per comodità nel plot: 
-                # 0 = Primary (Rosso), 1 = Secondary (Blu)
+                # 0 = primary, 1 = secondary
                 if raw_type == 'primary':
                     wp_types.append(0)
                 else:
